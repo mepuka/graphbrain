@@ -156,3 +156,74 @@ class CoreferenceError(ParserError):
     def __init__(self, message, text=None, cluster=None):
         super().__init__(message, text=text)
         self.cluster = cluster
+
+
+# ===================
+# Semsim Exceptions
+# ===================
+
+class SemsimError(GraphbrainError):
+    """Base exception for semantic similarity errors.
+
+    Attributes:
+        semsim_type: The type of semsim operation (FIX or CTX).
+        model: The model being used (if applicable).
+    """
+
+    def __init__(self, message, semsim_type=None, model=None):
+        super().__init__(message)
+        self.semsim_type = semsim_type
+        self.model = model
+
+
+class SemsimModelNotFoundError(SemsimError):
+    """Raised when a semsim model cannot be found or loaded.
+
+    Attributes:
+        model_name: The name of the model that was not found.
+    """
+
+    def __init__(self, message, model_name=None, semsim_type=None):
+        super().__init__(message, semsim_type=semsim_type, model=model_name)
+        self.model_name = model_name
+
+
+class SemsimOOVError(SemsimError):
+    """Raised when all words are out of vocabulary.
+
+    This typically occurs with older Word2Vec models that have
+    limited vocabulary coverage.
+
+    Attributes:
+        words: The out-of-vocabulary words.
+    """
+
+    def __init__(self, message, words=None, semsim_type=None, model=None):
+        super().__init__(message, semsim_type=semsim_type, model=model)
+        self.words = words or []
+
+
+class SemsimConfigError(SemsimError):
+    """Raised when semsim configuration is invalid.
+
+    Attributes:
+        config_key: The configuration key that is invalid.
+        config_value: The invalid value.
+    """
+
+    def __init__(self, message, config_key=None, config_value=None, semsim_type=None):
+        super().__init__(message, semsim_type=semsim_type)
+        self.config_key = config_key
+        self.config_value = config_value
+
+
+class SemsimThresholdError(SemsimError):
+    """Raised when similarity threshold is invalid.
+
+    Attributes:
+        threshold: The invalid threshold value.
+    """
+
+    def __init__(self, message, threshold=None, semsim_type=None):
+        super().__init__(message, semsim_type=semsim_type)
+        self.threshold = threshold

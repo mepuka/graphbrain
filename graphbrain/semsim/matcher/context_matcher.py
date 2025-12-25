@@ -25,15 +25,31 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 class ContextEmbeddingMatcher(SemSimMatcher):
     _SPACY_PIPE_TRF_COMPONENT_NAME: str = 'transformer'
-    _SPACY_DOC_CACHE_SIZE: int = 2048
-    _EMBEDDING_CACHE_SIZE: int = 2048
+    _SPACY_DOC_CACHE_SIZE: int = 10000  # Increased from 2048 for better caching
+    _EMBEDDING_CACHE_SIZE: int = 10000  # Increased from 2048 for better caching
 
     def __init__(self, config: SemSimConfig):
         super().__init__(config=config)
         self._use_all_tokes: bool = config.use_all_tokens
-        self._spacy_pipe: Language = self._create_spacy_pipeline(config.model_name)
-        self._embedding_prefix_tokens: list[str] = _get_embedding_prefix_tokens(config.embedding_prefix)
+        self._model_name: str = config.model_name
+        self._spacy_pipe: Language | None = None  # Lazy loaded
+        self._embedding_prefix_tokens: list[str] | None = None  # Lazy loaded
+        self._embedding_prefix: str | None = config.embedding_prefix
         self._cos_sim: CosineSimilarity = CosineSimilarity()
+
+    @property
+    def spacy_pipe(self) -> Language:
+        """Lazy-load the spacy transformer pipeline on first access."""
+        if self._spacy_pipe is None:
+            self._spacy_pipe = self._create_spacy_pipeline(self._model_name)
+        return self._spacy_pipe
+
+    @property
+    def embedding_prefix_tokens(self) -> list[str]:
+        """Lazy-load the embedding prefix tokens on first access."""
+        if self._embedding_prefix_tokens is None:
+            self._embedding_prefix_tokens = _get_embedding_prefix_tokens(self._embedding_prefix)
+        return self._embedding_prefix_tokens
 
     def _create_spacy_pipeline(self, model_name: str) -> Language:
         logger.info("Creating SpaCy transformer pipeline...")
@@ -101,21 +117,21 @@ class ContextEmbeddingMatcher(SemSimMatcher):
 
     @lru_cache(maxsize=_EMBEDDING_CACHE_SIZE)
     def _get_embedding(self, tokens: tuple[str, ...], tok_idxes: tuple[int, ...]) -> Union[Tensor, None]:
-        prefixed_tokens: tuple[str, ...] = tuple(self._embedding_prefix_tokens + list(tokens))
+        prefixed_tokens: tuple[str, ...] = tuple(self.embedding_prefix_tokens + list(tokens))
 
         spacy_doc, spacy_tokens = self._get_spacy_doc_and_tokens(prefixed_tokens)
         if not _validate_spacy_tokenization(prefixed_tokens, spacy_tokens):
             return None
 
         prefixed_tok_idxes: tuple[int, ...] = tuple(
-            tok_idx + len(self._embedding_prefix_tokens) for tok_idx in tok_idxes
+            tok_idx + len(self.embedding_prefix_tokens) for tok_idx in tok_idxes
         )
         return _get_trf_embedding_of_lex_tokens(spacy_tokens, prefixed_tok_idxes, spacy_doc._.trf_data)
 
     @lru_cache(maxsize=_SPACY_DOC_CACHE_SIZE)
     def _get_spacy_doc_and_tokens(self, tokens: tuple[str, ...] = None) -> tuple[Doc, tuple[str, ...]]:
-        spacy_doc: Doc = Doc(self._spacy_pipe.vocab, words=tokens)
-        self._spacy_pipe.get_pipe(self._SPACY_PIPE_TRF_COMPONENT_NAME)(spacy_doc)
+        spacy_doc: Doc = Doc(self.spacy_pipe.vocab, words=tokens)
+        self.spacy_pipe.get_pipe(self._SPACY_PIPE_TRF_COMPONENT_NAME)(spacy_doc)
         assert spacy_doc._.trf_data is not None, f"Missing trf_data"  # noqa
         return spacy_doc, tuple(tok.text for tok in spacy_doc)
 
@@ -138,10 +154,12 @@ def _get_trf_tok_idxes(
 ) -> tuple[int, ...]:
     lex2trf_idx: dict[int, list[int]] = _get_lex2trf_tok_idx(n_lex_tokens, alignment_data)
     tok_trf_idxes: list[int] = []
+    seen: set[int] = set()  # O(1) membership test instead of O(n) list check
     for lex_tok_idx in lex_tok_idxes:
         trf_tok_idxes_: list[int] = lex2trf_idx[lex_tok_idx]
         for trf_idx in trf_tok_idxes_:
-            if trf_idx not in tok_trf_idxes:
+            if trf_idx not in seen:
+                seen.add(trf_idx)
                 tok_trf_idxes.append(trf_idx)
     return tuple(tok_trf_idxes)
 
@@ -159,7 +177,8 @@ def _get_lex2trf_tok_idx(n_lex_toks: int, alignment_data: Ragged) -> dict[int, l
 
 
 # Adapted from: https://huggingface.co/intfloat/e5-base
-def _average_pool(last_hidden_states: Tensor, attention_mask: Tensor, normalize: bool = False) -> Tensor:
+# E5 models expect normalized embeddings for correct cosine similarity
+def _average_pool(last_hidden_states: Tensor, attention_mask: Tensor, normalize: bool = True) -> Tensor:
     last_hidden: Tensor = last_hidden_states.masked_fill(~attention_mask[..., None].bool(), 0.0)
     embeddings: Tensor = last_hidden.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
     if normalize:
