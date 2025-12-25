@@ -3,10 +3,16 @@ from typing import Dict, List, Tuple, Optional, Union
 from graphbrain.hyperedge import Hyperedge, hedge
 from graphbrain.hypergraph import Hypergraph
 from graphbrain.patterns.matcher import Matcher
-# SEMSIM disabled for now (see also commented code below)
-# from graphbrain.patterns.semsim.instances import SemSimInstance
-# from graphbrain.patterns.semsim.processing import match_semsim_instances
+from graphbrain.patterns.properties import SEMSIM_AVAILABLE
 from graphbrain.patterns.utils import _normalize_fun_patterns, _edge_tok_pos
+
+# Optional semsim imports (requires gensim)
+if SEMSIM_AVAILABLE:
+    from graphbrain.patterns.semsim.instances import SemSimInstance
+    from graphbrain.patterns.semsim.processing import match_semsim_instances
+else:
+    SemSimInstance = None  # type: ignore
+    match_semsim_instances = None  # type: ignore
 
 
 def match_pattern(
@@ -15,10 +21,9 @@ def match_pattern(
         curvars: Optional[dict[str, Hyperedge]] = None,
         ref_edges: Optional[List[Union[Hyperedge, str, list, tuple]]] = None,
         skip_semsim: bool = True,
-        hg: Optional[Hypergraph] = None
-# SEMSIM disabled for now
-# ) -> Union[List[Dict], Tuple[List[Dict], List[SemSimInstance]]]:
-) -> List[Dict]:
+        hg: Optional[Hypergraph] = None,
+        return_semsim_instances: bool = False
+) -> Union[List[Dict], Tuple[List[Dict], List[SemSimInstance]]]:
     """Matches an edge to a pattern. This means that, if the edge fits the
     pattern, then a list of dictionaries will be returned. If the pattern
     specifies variables, then the returned dictionaries will be populated
@@ -67,21 +72,35 @@ def match_pattern(
         hg=hg
     )
 
-    return matcher.results  # remove when activating SEMSIM
-    # SEMSIM disabled for now
-    # if skip_semsim:
-    #     return matcher.results, matcher.semsim_instances
+    # If skip_semsim is True or semsim not available, return results directly
+    # (semsim patterns still get basic structural matching but not semantic
+    # similarity verification)
+    if skip_semsim or not SEMSIM_AVAILABLE:
+        if return_semsim_instances:
+            return matcher.results, matcher.semsim_instances
+        return matcher.results
 
-    # if matcher.results and match_semsim_instances(
-    #         matcher.semsim_instances,
-    #         pattern=pattern,
-    #         edge=edge,
-    #         ref_edges=ref_edges,
-    #         hg=hg
-    # ):
-    #     return matcher.results
+    # Full semsim processing: verify semantic similarity for semsim patterns
+    if matcher.results and matcher.semsim_instances:
+        if match_semsim_instances(
+                matcher.semsim_instances,
+                pattern=pattern,
+                edge=edge,
+                ref_edges=ref_edges,
+                hg=hg
+        ):
+            if return_semsim_instances:
+                return matcher.results, matcher.semsim_instances
+            return matcher.results
+        # Semsim verification failed
+        if return_semsim_instances:
+            return [], matcher.semsim_instances
+        return []
 
-    return []
+    # No semsim instances to verify, return structural match results
+    if return_semsim_instances:
+        return matcher.results, matcher.semsim_instances
+    return matcher.results
 
 
 def edge_matches_pattern(

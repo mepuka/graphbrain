@@ -1,4 +1,5 @@
 from typing import Iterator, Union, Optional
+from contextlib import contextmanager
 
 import graphbrain.constants as const
 from graphbrain.hyperedge import hedge, Hyperedge, str2atom
@@ -58,10 +59,55 @@ class Hypergraph(object):
         raise NotImplementedError()
 
     def begin_transaction(self):
+        """Begin a transaction.
+
+        Raises:
+            TransactionError: If a transaction is already in progress.
+        """
         pass
 
     def end_transaction(self):
+        """End (commit) the current transaction.
+
+        Raises:
+            TransactionError: If no transaction is in progress.
+        """
         pass
+
+    def rollback(self):
+        """Rollback the current transaction, discarding all changes.
+
+        Raises:
+            TransactionError: If no transaction is in progress.
+        """
+        pass
+
+    def in_transaction(self):
+        """Check if a transaction is currently in progress.
+
+        Returns:
+            bool: True if a transaction is active, False otherwise.
+        """
+        return False
+
+    @contextmanager
+    def transaction(self):
+        """Context manager for transactions.
+
+        Commits on successful exit, rolls back on exception.
+
+        Example:
+            with hg.transaction():
+                hg.add(edge1)
+                hg.add(edge2)  # Both committed atomically
+        """
+        self.begin_transaction()
+        try:
+            yield self
+            self.end_transaction()
+        except Exception:
+            self.rollback()
+            raise
 
     # ============================
     # High-level interface methods

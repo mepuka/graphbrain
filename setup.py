@@ -61,6 +61,7 @@ install_requires = [
         # SEMSIM disabled
         # 'gensim',
         'ipython',
+        'msgpack>=1.0.0',
         'mwparserfromhell',
         'networkx',
         # fixed for now because of spacy

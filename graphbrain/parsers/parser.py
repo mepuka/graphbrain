@@ -1,9 +1,13 @@
+import logging
 import re
 
 import graphbrain.constants as const
 
 from graphbrain import hedge
 from graphbrain.hyperedge import UniqueAtom
+
+
+logger = logging.getLogger(__name__)
 
 
 def _contains_resolution(edge):
@@ -29,7 +33,7 @@ class Parser(object):
 
     def debug_msg(self, msg):
         if self.debug:
-            print(msg)
+            logger.debug(msg)
 
     def parse(self, text):
         """Transforms the given text into hyperedges + aditional information.
@@ -126,12 +130,30 @@ class Parser(object):
             for subedge, reference_subedge in zip(edge, _reference_edge):
                 self._set_edge_text(subedge, reference_subedge, hg, parse)
 
-    def parse_and_add(self, text, hg, sequence=None, infsrcs=False, max_text=1500):
-        # split large blocks of text to avoid coreference resolution errors
+    def parse_and_add(self, text, hg, sequence=None, infsrcs=False, max_text=None):
+        """Parse text and add results to hypergraph.
+
+        Args:
+            text: Text to parse.
+            hg: Hypergraph to add edges to.
+            sequence: Optional sequence name to add edges to.
+            infsrcs: Whether to add inference source edges.
+            max_text: Maximum text length for coreference. None uses config default,
+                     0 means no limit, -1 disables chunking.
+        """
+        from graphbrain.parsers.config import get_config
+
+        # Determine max_text from config if not specified
+        if max_text is None:
+            config = get_config()
+            max_text = config.parser.max_coref_text
+
+        # Split large text blocks to avoid coreference resolution errors
         if self.corefs and 0 < max_text < len(text):
             parse_results = {'parses': [], 'inferred_edges': []}
-            for sentence in self.sentences(text):
-                _parse_results = self.parse_and_add(sentence, hg=hg, sequence=sequence, infsrcs=infsrcs, max_text=-1)
+            chunks = self._smart_chunk_text(text, max_text)
+            for chunk in chunks:
+                _parse_results = self.parse_and_add(chunk, hg=hg, sequence=sequence, infsrcs=infsrcs, max_text=-1)
                 parse_results['parses'] += _parse_results['parses']
                 parse_results['inferred_edges'] += _parse_results['inferred_edges']
             return parse_results
@@ -174,6 +196,77 @@ class Parser(object):
                 hg.add(inference_srcs_edge)
 
         return parse_results
+
+    def _smart_chunk_text(self, text, max_chars):
+        """Split text into chunks that respect sentence boundaries.
+
+        Creates chunks that:
+        - Stay under max_chars limit
+        - Break only at sentence boundaries
+        - Group related sentences when possible
+
+        Args:
+            text: Text to chunk.
+            max_chars: Maximum characters per chunk.
+
+        Returns:
+            List of text chunks.
+        """
+        from graphbrain.parsers.config import get_config
+
+        sentences = self.sentences(text)
+
+        if not sentences:
+            return [text] if text.strip() else []
+
+        config = get_config()
+        overlap_chars = config.parser.chunk_overlap
+
+        chunks = []
+        current_chunk = []
+        current_length = 0
+
+        for sentence in sentences:
+            sentence_len = len(sentence)
+
+            # If single sentence exceeds max, include it alone
+            if sentence_len > max_chars:
+                if current_chunk:
+                    chunks.append(' '.join(current_chunk))
+                    current_chunk = []
+                    current_length = 0
+                chunks.append(sentence)
+                continue
+
+            # Check if adding this sentence would exceed limit
+            if current_length + sentence_len + 1 > max_chars:
+                if current_chunk:
+                    chunks.append(' '.join(current_chunk))
+
+                    # Add overlap: include last sentence(s) in next chunk
+                    if overlap_chars > 0 and current_chunk:
+                        overlap_sentences = []
+                        overlap_len = 0
+                        for s in reversed(current_chunk):
+                            if overlap_len + len(s) <= overlap_chars:
+                                overlap_sentences.insert(0, s)
+                                overlap_len += len(s) + 1
+                            else:
+                                break
+                        current_chunk = overlap_sentences
+                        current_length = overlap_len
+                    else:
+                        current_chunk = []
+                        current_length = 0
+
+            current_chunk.append(sentence)
+            current_length += sentence_len + 1
+
+        # Add final chunk
+        if current_chunk:
+            chunks.append(' '.join(current_chunk))
+
+        return chunks
 
     def sentences(self, text):
         raise NotImplementedError()

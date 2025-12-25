@@ -87,7 +87,7 @@ class TestPatterns(unittest.TestCase):
         self.assertTrue(is_full_pattern(hedge('(*)')))
 
     def test_is_full_pattern6(self):
-        self.assertTrue(is_full_pattern(hedge('(* * *')))
+        self.assertTrue(is_full_pattern(hedge('(* * *)')))
 
     def test_is_full_pattern7(self):
         self.assertTrue(is_full_pattern(hedge('(* * * ...)')))
@@ -953,7 +953,7 @@ class TestPatterns(unittest.TestCase):
         self.assertTrue(pc.patterns[hedge('(*/M */C)')] == 4)
         self.assertTrue(pc.patterns[hedge('(*/M (*/M */C))')] == 3)
         self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M */C)))')] == 2)
-        self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C)))(')] == 1)
+        self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C))))')] == 1)
 
     def test_counter9(self):
         pc = PatternCounter(depth=3)
@@ -962,7 +962,7 @@ class TestPatterns(unittest.TestCase):
         self.assertTrue(pc.patterns[hedge('(*/M */C)')] == 4)
         self.assertTrue(pc.patterns[hedge('(*/M (*/M */C))')] == 3)
         self.assertTrue(pc.patterns[hedge('(*/M (*/M (*/M */C)))')] == 2)
-        self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C)))(')] == 1)
+        self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C))))')] == 1)
 
     def test_counter10(self):
         pc = PatternCounter(depth=4)
@@ -971,7 +971,7 @@ class TestPatterns(unittest.TestCase):
         self.assertTrue(pc.patterns[hedge('(*/M */C)')] == 4)
         self.assertTrue(pc.patterns[hedge('(*/M (*/M */C))')] == 3)
         self.assertTrue(pc.patterns[hedge('(*/M (*/M (*/M */C)))')] == 2)
-        self.assertTrue(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C)))(')] == 1)
+        self.assertTrue(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C))))')] == 1)
 
     def test_counter11(self):
         pc = PatternCounter(depth=1)
@@ -980,7 +980,7 @@ class TestPatterns(unittest.TestCase):
         self.assertTrue(pc.patterns[hedge('(*/M */C)')] == 4)
         self.assertFalse(pc.patterns[hedge('(*/M (*/M */C))')] == 3)
         self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M */C)))')] == 2)
-        self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C)))(')] == 1)
+        self.assertFalse(pc.patterns[hedge('(*/M (*/M (*/M (*/M */C))))')] == 1)
 
     def test_match_pattern_real_case1(self):
         s = "((var ((atoms (lemma be/M)) *) PRED) (var * ARG1) (var * ARG2))"

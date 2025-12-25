@@ -297,7 +297,9 @@ class TestHyperedge(unittest.TestCase):
         self.assertEqual(hedge('(a b)').connect(hedge('(c d)')).to_str(), '(a b c d)')
 
     def test_connect2(self):
-        self.assertEqual(hedge('(a b)').connect(hedge('()')).to_str(), '(a b)')
+        # Test that connect with None or empty returns original edge
+        self.assertEqual(hedge('(a b)').connect(None).to_str(), '(a b)')
+        self.assertEqual(hedge('(a b)').connect(()).to_str(), '(a b)')
 
     def test_sequence(self):
         ab = hedge('(a b)')

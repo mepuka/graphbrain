@@ -1,8 +1,26 @@
 from typing import Set
 
-# semsim disabled for now
-# from graphbrain.patterns.semsim.types import SEMSIM_FUNS
-FUNS: Set[str] = {'var', 'atoms', 'lemma', 'any'} # | SEMSIM_FUNS.keys()
+# Base pattern functions (always available)
+_BASE_FUNS: Set[str] = {
+    'var',      # Variable binding
+    'atoms',    # Match atoms in any order
+    'lemma',    # Match by lemma
+    'any',      # Match any of the sub-patterns (OR)
+    'not',      # Negation - match if sub-pattern doesn't match
+    'all',      # Universal - all sub-patterns must match
+    'exists',   # Existential - at least one sub-pattern matches
+    'depth',    # Depth constraint - match at specific nesting depth
+}
+
+# Try to import semsim functions (requires gensim)
+try:
+    from graphbrain.patterns.semsim.types import SEMSIM_FUNS
+    SEMSIM_AVAILABLE = True
+    FUNS: Set[str] = _BASE_FUNS | SEMSIM_FUNS.keys()
+except ImportError:
+    SEMSIM_AVAILABLE = False
+    SEMSIM_FUNS = {}
+    FUNS: Set[str] = _BASE_FUNS
 
 def is_wildcard(atom):
     """Check if this atom defines a wildcard, i.e. if its root is a pattern matcher.

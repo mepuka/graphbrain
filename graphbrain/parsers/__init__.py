@@ -1,5 +1,6 @@
 from importlib import import_module
 
+from .config import ParserSystemConfig, get_config, set_config, reset_config
 from .nlp import print_tree
 from .parser_en import ParserEN
 from .text import edge_text

@@ -1,11 +1,17 @@
+import logging
 import pkg_resources
 
 import spacy
 
 from graphbrain import hedge
+from graphbrain.exceptions import ModelNotFoundError
 from graphbrain.parsers.alpha import Alpha
 from graphbrain.parsers.alpha_beta import AlphaBeta
+from graphbrain.parsers.config import get_config
 from graphbrain.utils.english import to_american
+
+
+logger = logging.getLogger(__name__)
 
 
 LANG = 'en'
@@ -53,29 +59,67 @@ def first_predicate(edge):
 
 class ParserEN(AlphaBeta):
     def __init__(self, lemmas=False, corefs=False, beta='repair', normalize=True, post_process=True):
-        if spacy.util.is_package('en_core_web_trf'):
-            nlp = spacy.load('en_core_web_trf')
-            print('Using language model: {}'.format('en_core_web_trf'))
-        else:
-            if corefs:
-                raise RuntimeError(
-                    'Coreference resolution requires en_core_web_trf English language model to be installed.')
-            elif spacy.util.is_package('en_core_web_lg'):
-                nlp = spacy.load('en_core_web_lg')
-                print('Using language model: {}'.format('en_core_web_lg'))
-            else:
-                raise RuntimeError('Either en_core_web_trf or en_core_web_lg English language model must be installed.')
+        config = get_config()
+        nlp = self._load_language_model(corefs, config)
+
         if corefs:
-            nlp_coref = spacy.load('en_coreference_web_trf')
+            coref_model = config.models.coreference
+            logger.info(f"Loading coreference model: {coref_model}")
+            nlp_coref = spacy.load(coref_model)
             nlp.add_pipe('transformer', name='coref_transformer', source=nlp_coref)
             nlp.add_pipe('coref', source=nlp_coref)
             nlp.add_pipe('span_resolver', source=nlp_coref)
             nlp.add_pipe('span_cleaner', source=nlp_coref)
-             
+
         super().__init__(nlp, lemmas=lemmas, corefs=corefs, beta=beta, normalize=normalize, post_process=post_process)
         self.lang = LANG
         cases_str = pkg_resources.resource_string('graphbrain', 'data/atoms-en.csv').decode('utf-8')
         self.alpha = Alpha(cases_str)
+
+    def _load_language_model(self, corefs, config):
+        """Load spaCy language model with fallback chain.
+
+        Args:
+            corefs: Whether coreference resolution is enabled.
+            config: Parser configuration.
+
+        Returns:
+            Loaded spaCy model.
+
+        Raises:
+            ModelNotFoundError: If no suitable model is found.
+        """
+        # Build model chain: preferred first, then fallbacks
+        model_chain = [config.models.preferred] + config.models.fallbacks
+        tried_models = []
+
+        for model_name in model_chain:
+            if spacy.util.is_package(model_name):
+                # Check if corefs requires specific model
+                if corefs and model_name != config.models.coreference_requires:
+                    if not spacy.util.is_package(config.models.coreference_requires):
+                        raise ModelNotFoundError(
+                            f"Coreference resolution requires {config.models.coreference_requires} "
+                            f"language model to be installed.",
+                            model_name=config.models.coreference_requires
+                        )
+                    # Use the required model for corefs
+                    model_name = config.models.coreference_requires
+
+                nlp = spacy.load(model_name)
+                if config.logging.log_model_loading:
+                    logger.info(f"Using language model: {model_name}")
+                return nlp
+
+            tried_models.append(model_name)
+
+        # No model found
+        raise ModelNotFoundError(
+            f"No suitable English language model found. Tried: {', '.join(tried_models)}. "
+            f"Install one with: python -m spacy download en_core_web_lg",
+            model_name=config.models.preferred,
+            fallbacks_tried=tried_models
+        )
 
     # ===========================================
     # Implementation of language-specific methods

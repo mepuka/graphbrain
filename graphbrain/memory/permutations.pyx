@@ -16,15 +16,13 @@
 # and so on...
 import itertools
 import math
+from functools import lru_cache
 
 from graphbrain.hyperedge import hedge, split_edge_str
 
 
 # maximum permutations of an edge that are written to the database
 MAX_PERMS = 1000
-
-
-permcache = {}
 
 
 def fact(n):
@@ -36,10 +34,12 @@ def fact(n):
     return res
 
 
+@lru_cache(maxsize=10000)
 def nthperm(n, nper):
-    if n in permcache and nper in permcache[n]:
-        return permcache[n][nper]
+    """Compute the nper-th permutation of n elements.
 
+    Uses LRU cache to limit memory usage while maintaining fast lookups.
+    """
     pos = 0
     pindices = None
     for perm in itertools.permutations(range(n)):
@@ -47,11 +47,7 @@ def nthperm(n, nper):
             pindices = perm
             break
         pos += 1
-    perm = tuple(pindices[i] for i in range(n))
-    if n not in permcache:
-        permcache[n] = {}
-    permcache[n][nper] = perm
-    return perm
+    return tuple(pindices[i] for i in range(n))
 
 
 def permutate(tokens, nper):
@@ -98,10 +94,9 @@ def perm2edge(perm_str):
     """Transforms a permutation string from a database query
        into an edge.
     """
+    from graphbrain.exceptions import EdgeParseError
     try:
         tokens = split_edge_str(perm_str)
-        if tokens is None:
-            return None
         nper = int(tokens[-1])
         tokens = tokens[:-1]
         tokens = unpermutate(tokens, nper)
@@ -109,7 +104,7 @@ def perm2edge(perm_str):
         if len(tokens) > 1:
             edge_str = ''.join(('(', edge_str, ')'))
         return hedge(edge_str)
-    except ValueError:
+    except (ValueError, EdgeParseError):
         return None
 
 

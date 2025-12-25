@@ -1,12 +1,37 @@
 import json
+import logging
 import traceback
 from abc import ABC
 from collections import Counter
+from dataclasses import dataclass, field
+from typing import Optional
 
 import graphbrain.constants as const
 from .parser import Parser
+from graphbrain.exceptions import SpacyProcessingError, AtomConstructionError, RuleApplicationError
 from graphbrain.hyperedge import build_atom, hedge, non_unique, unique, UniqueAtom
 from graphbrain.utils.concepts import has_common_or_proper_concept
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BeamCandidate:
+    """A candidate parse in beam search."""
+
+    sequence: list  # Current sequence of edges
+    score: float = 0.0  # Cumulative score
+    history: list = field(default_factory=list)  # Applied rules for debugging
+    failed: bool = False  # Whether parsing failed
+
+    def is_terminal(self) -> bool:
+        """Check if this candidate has reached a terminal state."""
+        return len(self.sequence) < 2 or self.failed
+
+    def __lt__(self, other):
+        """Compare by score for heap operations."""
+        return self.score > other.score  # Higher score = better
 
 
 def _resolved_to(edge, resolved_edge):
@@ -189,7 +214,17 @@ class AlphaBeta(Parser, ABC):
             self._compute_depths_and_connections(sent.root)
 
             main_edge = None
-            result, failed = self._parse_atom_sequence(atom_sequence)
+            # Use beam search or greedy based on configuration
+            from graphbrain.parsers.config import get_config
+            config = get_config()
+            if config.parser.use_beam_search:
+                result, failed = self._parse_atom_sequence_beam(
+                    atom_sequence,
+                    beam_width=config.parser.beam_width,
+                    max_iterations=config.parser.beam_max_iterations
+                )
+            else:
+                result, failed = self._parse_atom_sequence(atom_sequence)
             if result and len(result) == 1:
                 main_edge = non_unique(result[0])
                 # break
@@ -221,13 +256,30 @@ class AlphaBeta(Parser, ABC):
                     # TODO: HACK TEMPORARY
                     'atom2token': atom2token,
                     'spacy_sentence': sent}
+        except (AtomConstructionError, RuleApplicationError) as e:
+            # Known parser errors - log at warning level
+            logger.warning(f"Parser error while parsing sentence: {e}")
+            logger.debug(f"Sentence: {sent}")
+            return {'main_edge': None,
+                    'extra_edges': [],
+                    'failed': True,
+                    'text': str(sent).strip(),
+                    'atom2word': {},
+                    'spacy_sentence': sent}
+        except (KeyError, IndexError, AttributeError) as e:
+            # Common errors during parsing - log with context
+            logger.warning(f"Parsing failed for sentence: {e.__class__.__name__}: {e}")
+            logger.debug(f"Sentence: {sent}", exc_info=True)
+            return {'main_edge': None,
+                    'extra_edges': [],
+                    'failed': True,
+                    'text': str(sent).strip(),
+                    'atom2word': {},
+                    'spacy_sentence': sent}
         except Exception as e:
-            if hasattr(e, 'message'):
-                msg = e.message
-            else:
-                msg = str(e)
-            print('Caught exception: {} while parsing: "{}"'.format(msg, str(sent)))
-            traceback.print_exc()
+            # Unexpected errors - log at error level with full traceback
+            logger.error(f"Unexpected error while parsing: {e}", exc_info=True)
+            logger.error(f"Sentence: {sent}")
             return {'main_edge': None,
                     'extra_edges': [],
                     'failed': True,
@@ -662,6 +714,109 @@ class AlphaBeta(Parser, ABC):
             if len(sequence) < 2:
                 return sequence, False
 
+    def _parse_atom_sequence_beam(self, atom_sequence, beam_width=3, max_iterations=100):
+        """Parse atom sequence using beam search algorithm.
+
+        Args:
+            atom_sequence: Initial sequence of atoms to parse.
+            beam_width: Number of candidates to keep at each step.
+            max_iterations: Maximum iterations before fallback.
+
+        Returns:
+            Tuple of (result_sequence, failed_flag)
+        """
+        import heapq
+
+        # Initialize beam with starting candidate
+        initial = BeamCandidate(sequence=list(atom_sequence), score=0.0)
+        beam = [initial]
+        completed = []
+
+        for iteration in range(max_iterations):
+            if not beam:
+                break
+
+            # Expand all candidates in current beam
+            next_candidates = []
+
+            for candidate in beam:
+                if candidate.is_terminal():
+                    completed.append(candidate)
+                    continue
+
+                sequence = candidate.sequence
+                found_action = False
+
+                # Try all rules at all positions
+                for rule_number, rule in enumerate(self.rules):
+                    window_start = rule.size - 1
+                    for pos in range(window_start, len(sequence)):
+                        new_edge = _apply_rule(rule, sequence, pos)
+                        if new_edge:
+                            found_action = True
+                            score = self._score(sequence[pos - window_start:pos + 1])
+                            score -= rule_number  # Prefer earlier rules
+
+                            new_sequence = (
+                                sequence[:pos - window_start] +
+                                [new_edge] +
+                                sequence[pos + 1:]
+                            )
+
+                            new_candidate = BeamCandidate(
+                                sequence=new_sequence,
+                                score=candidate.score + score,
+                                history=candidate.history + [(rule, pos, new_edge)],
+                            )
+                            next_candidates.append(new_candidate)
+
+                # If no valid action, try fallback
+                if not found_action:
+                    if len(sequence) > 0:
+                        fallback_seq = [hedge([':/J/.'] + sequence[:2])] + sequence[2:]
+                        fallback = BeamCandidate(
+                            sequence=fallback_seq,
+                            score=candidate.score - 1000,  # Penalize fallback
+                            history=candidate.history + [('fallback', 0, None)],
+                        )
+                        next_candidates.append(fallback)
+                    else:
+                        failed = BeamCandidate(
+                            sequence=[],
+                            score=candidate.score - 10000,
+                            failed=True,
+                        )
+                        completed.append(failed)
+
+            # Keep top-k candidates for next iteration
+            if next_candidates:
+                # Sort by score (descending) and keep top beam_width
+                next_candidates.sort(key=lambda c: c.score, reverse=True)
+                beam = next_candidates[:beam_width]
+            else:
+                beam = []
+
+            # Check if all remaining candidates are terminal
+            all_terminal = all(c.is_terminal() for c in beam)
+            if all_terminal:
+                completed.extend(beam)
+                break
+
+        # Add any remaining beam candidates to completed
+        completed.extend(beam)
+
+        # Select best completed candidate
+        if completed:
+            completed.sort(key=lambda c: (not c.failed, c.score), reverse=True)
+            best = completed[0]
+            logger.debug(f"Beam search completed with score {best.score}, "
+                        f"sequence length {len(best.sequence)}")
+            return best.sequence, best.failed
+
+        # Fallback: no candidates found
+        logger.warning("Beam search produced no candidates")
+        return None, True
+
     def _parse(self, text):
         """Transforms the given text into hyperedges + aditional information.
         Returns a sequence of dictionaries, with one dictionary for each
@@ -691,7 +846,12 @@ class AlphaBeta(Parser, ABC):
                 parses.append(self.parse_spacy_sentence(sent, offset=offset))
                 offset += len(sent)
         except RuntimeError as error:
-            print(error)
+            logger.error(f"SpaCy runtime error during parsing: {error}")
+            raise SpacyProcessingError(
+                str(error),
+                text=text[:100] if len(text) > 100 else text,
+                stage='parse'
+            ) from error
         return {'parses': parses, 'inferred_edges': []}
 
     def sentences(self, text):

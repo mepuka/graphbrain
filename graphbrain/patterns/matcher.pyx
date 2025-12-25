@@ -6,14 +6,19 @@ from graphbrain.hyperedge import Hyperedge
 from graphbrain.hypergraph import Hypergraph
 from graphbrain.patterns.argroles import _match_by_argroles
 from graphbrain.patterns.atoms import _matches_atomic_pattern
-from graphbrain.patterns.properties import is_fun_pattern, is_pattern, FUNS
-# SEMSIM disabled for now (see also commented code below)
-# from graphbrain.patterns.semsim.types import SEMSIM_FUNS
-# from graphbrain.patterns.semsim.matching import match_semsim
-# from graphbrain.patterns.semsim.instances import SemSimInstance
+from graphbrain.patterns.properties import is_fun_pattern, is_pattern, FUNS, SEMSIM_AVAILABLE
 from graphbrain.patterns.utils import _defun_pattern_argroles, _atoms_and_tok_pos
 from graphbrain.patterns.variables import _varname, _assign_edge_to_var
 from graphbrain.utils.lemmas import lemma
+
+# Optional semsim imports (requires gensim)
+if SEMSIM_AVAILABLE:
+    from graphbrain.patterns.semsim.types import SEMSIM_FUNS
+    from graphbrain.patterns.semsim.matching import match_semsim
+    from graphbrain.patterns.semsim.instances import SemSimInstance
+else:
+    SEMSIM_FUNS = {}
+    SemSimInstance = None  # type: ignore
 
 
 class Matcher:
@@ -28,9 +33,7 @@ class Matcher:
     ):
         self.hg: Hypergraph = hg
         self.skip_semsim: bool = skip_semsim
-
-        # SEMSIM disabled for now
-        # self.semsim_instances: List[SemSimInstance] = []
+        self.semsim_instances: list = []  # List of SemSimInstance when semsim is available
         self.results: List[Dict] = self.match(edge, pattern, curvars=curvars, tok_pos=tok_pos)
 
     def match(self, edge, pattern, curvars=None, tok_pos=None):
@@ -125,25 +128,28 @@ class Matcher:
         # match by argroles
         else:
             result = []
-            # match connector first
-            # TODO: avoid matching connector twice!
+            # match connector first and capture variables
             ctok_pos = tok_pos[0] if tok_pos else None
-            if self.match(edge[0], pattern[0], curvars, tok_pos=ctok_pos):
+            connector_matches = self.match(edge[0], pattern[0], curvars, tok_pos=ctok_pos)
+            if connector_matches:
                 role_counts = Counter(argroles_opt).most_common()
                 unknown_roles = (len(pattern) - 1) - len(argroles_opt)
                 if unknown_roles > 0:
                     role_counts.append(('*', unknown_roles))
-                # add connector pseudo-argrole
-                role_counts = [('X', 1)] + role_counts
-                result = _match_by_argroles(
-                    self,
-                    edge,
-                    pattern,
-                    role_counts,
-                    len(argroles),
-                    curvars=curvars,
-                    tok_pos=tok_pos
-                )
+                # No need to add 'X' pseudo-argrole - connector already matched above
+                # Pass connector match variables to argrole matching
+                for conn_vars in connector_matches:
+                    merged_vars = {**curvars, **conn_vars}
+                    result += _match_by_argroles(
+                        self,
+                        edge,
+                        pattern,
+                        role_counts,
+                        len(argroles),
+                        matched=(edge[0],),  # Mark connector as already matched
+                        curvars=merged_vars,
+                        tok_pos=tok_pos
+                    )
 
         unique_vars = []
         for variables in result:
@@ -261,15 +267,94 @@ class Matcher:
             return []
         elif fun == 'lemma':
             return self._match_lemma(fun_pattern[1], edge, curvars)
-        # SEMSIM disabled for now
-        # elif fun in SEMSIM_FUNS:
-        #     return match_semsim(
-        #         matcher=self,
-        #         semsim_fun=fun,
-        #         pattern_parts=fun_pattern[1:],
-        #         edge=edge,
-        #         curvars=curvars,
-        #         tok_pos=tok_pos,
-        #     )
+        elif fun == 'not':
+            # Negation: match if sub-pattern does NOT match
+            if len(fun_pattern) != 2:
+                raise RuntimeError('not pattern function must have exactly one argument')
+            sub_matches = self.match(edge, fun_pattern[1], curvars, tok_pos=tok_pos)
+            if len(sub_matches) == 0:
+                return [curvars]
+            return []
+        elif fun == 'all':
+            # Universal: ALL sub-patterns must match
+            if len(fun_pattern) < 2:
+                raise RuntimeError('all pattern function must have at least one argument')
+            result = [curvars]
+            for pattern in fun_pattern[1:]:
+                new_result = []
+                for variables in result:
+                    matches = self.match(edge, pattern, {**curvars, **variables}, tok_pos=tok_pos)
+                    new_result.extend(matches)
+                result = new_result
+                if not result:
+                    return []
+            return result
+        elif fun == 'exists':
+            # Existential: at least one sub-pattern must match
+            if len(fun_pattern) < 2:
+                raise RuntimeError('exists pattern function must have at least one argument')
+            for pattern in fun_pattern[1:]:
+                matches = self.match(edge, pattern, curvars, tok_pos=tok_pos)
+                if len(matches) > 0:
+                    return matches
+            return []
+        elif fun == 'depth':
+            # Depth constraint: match pattern only at specific nesting depth
+            if len(fun_pattern) != 3:
+                raise RuntimeError('depth pattern function requires depth number and pattern')
+            try:
+                max_depth = int(fun_pattern[1].root())
+            except (ValueError, AttributeError):
+                raise RuntimeError('depth pattern function first argument must be a number')
+            pattern = fun_pattern[2]
+            return self._match_at_depth(edge, pattern, max_depth, curvars, tok_pos)
+        elif SEMSIM_AVAILABLE and fun in SEMSIM_FUNS:
+            return match_semsim(
+                matcher=self,
+                semsim_fun=fun,
+                pattern_parts=fun_pattern[1:],
+                edge=edge,
+                curvars=curvars,
+                tok_pos=tok_pos,
+            )
+        elif fun in ('semsim', 'semsim-fix', 'semsim-fix-lemma', 'semsim-ctx'):
+            raise RuntimeError(
+                f"Semantic similarity pattern function '{fun}' requires gensim. "
+                "Install it with: pip install gensim"
+            )
         else:
             raise NotImplementedError(f"Pattern function '{fun}' not implemented.")
+
+    def _match_at_depth(self, edge, pattern, max_depth, curvars, tok_pos, current_depth=0):
+        """Match pattern at a specific nesting depth.
+
+        Args:
+            edge: Edge to match against.
+            pattern: Pattern to match.
+            max_depth: Maximum depth to search.
+            curvars: Current variables.
+            tok_pos: Token positions.
+            current_depth: Current search depth.
+
+        Returns:
+            List of variable bindings if matched.
+        """
+        if current_depth > max_depth:
+            return []
+
+        # Try matching at current depth
+        results = []
+        if current_depth == max_depth:
+            matches = self.match(edge, pattern, curvars, tok_pos=tok_pos)
+            results.extend(matches)
+        else:
+            # Recurse into sub-edges
+            if edge.not_atom:
+                for i, subedge in enumerate(edge):
+                    sub_tok_pos = tok_pos[i] if tok_pos and i < len(tok_pos) else None
+                    sub_matches = self._match_at_depth(
+                        subedge, pattern, max_depth, curvars, sub_tok_pos, current_depth + 1
+                    )
+                    results.extend(sub_matches)
+
+        return results

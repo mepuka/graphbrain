@@ -1,3 +1,39 @@
+from graphbrain.exceptions import EdgeParseError, ValidationError
+
+
+# Character encoding/decoding maps for atom string conversion
+# Note: The order matters for encoding - % must be encoded first to avoid
+# double-encoding, and decoded last to avoid incorrect decoding
+_ENCODE_CHARS = (
+    ('%', '%25'),
+    ('/', '%2f'),
+    (' ', '%20'),
+    ('(', '%28'),
+    (')', '%29'),
+    ('.', '%2e'),
+    ('*', '%2a'),
+    ('&', '%26'),
+    ('@', '%40'),
+    ('\n', '%0a'),
+    ('\r', '%0d'),
+)
+
+# Decode chars - % must be decoded last to avoid incorrect decoding
+_DECODE_CHARS = (
+    ('%2f', '/'),
+    ('%20', ' '),
+    ('%28', '('),
+    ('%29', ')'),
+    ('%2e', '.'),
+    ('%2a', '*'),
+    ('%26', '&'),
+    ('%40', '@'),
+    ('%0a', '\n'),
+    ('%0d', '\r'),
+    ('%25', '%'),  # Must be last
+)
+
+
 argrole_order = {
     'm': -1,
     's': 0,
@@ -15,21 +51,14 @@ argrole_order = {
 
 
 def str2atom(s):
-    """Converts a string into a valid atom."""
-    atom = s.lower() 
+    """Converts a string into a valid atom.
 
-    atom = atom.replace('%', '%25')
-    atom = atom.replace('/', '%2f')
-    atom = atom.replace(' ', '%20')
-    atom = atom.replace('(', '%28')
-    atom = atom.replace(')', '%29')
-    atom = atom.replace('.', '%2e')
-    atom = atom.replace('*', '%2a')
-    atom = atom.replace('&', '%26')
-    atom = atom.replace('@', '%40')
-    atom = atom.replace('\n', '%0a')
-    atom = atom.replace('\r', '%0d')
-
+    Special characters are percent-encoded to ensure valid atom format.
+    Order matters: % must be encoded first to avoid double-encoding.
+    """
+    atom = s.lower()
+    for char, encoded in _ENCODE_CHARS:
+        atom = atom.replace(char, encoded)
     return atom
 
 
@@ -88,8 +117,11 @@ def split_edge_str(str edge_str):
                 tokens.append(edge_str[start:i + 1])
                 active = 0
             elif depth < 0:
-                # TODO: throw exception?
-                return None
+                raise EdgeParseError(
+                    f"Unbalanced parentheses: unexpected ')' at position {i}",
+                    edge_str=edge_str,
+                    position=i
+                )
         else:
             if not active:
                 active = 1
@@ -97,8 +129,11 @@ def split_edge_str(str edge_str):
 
     if active:
         if depth > 0:
-            # TODO: throw exception?
-            return None
+            raise EdgeParseError(
+                f"Unbalanced parentheses: {depth} unclosed '(' in edge string",
+                edge_str=edge_str,
+                position=len(edge_str)
+            )
         else:
             tokens.append(edge_str[start:])
 
@@ -113,33 +148,74 @@ def _parsed_token(token):
 
 
 def hedge(source):
-    """Create a hyperedge."""
+    """Create a hyperedge.
+
+    Args:
+        source: A string, tuple, list, or existing hyperedge.
+
+    Returns:
+        A Hyperedge or Atom instance.
+
+    Raises:
+        ValidationError: If source is not a valid type (str, tuple, list, or edge).
+        EdgeParseError: If source is a string that cannot be parsed.
+    """
     cdef str edge_str
     cdef str edge_inner_str
+
+    # Handle tuple/list input
     if type(source) in {tuple, list}:
+        if len(source) == 0:
+            raise EdgeParseError("Cannot create edge from empty sequence", edge_str="")
         return Hyperedge(tuple(hedge(item) for item in source))
+
+    # Handle string input
     elif type(source) is str:
         edge_str = source.strip().replace('\n', ' ')
+
+        # Validate non-empty
+        if not edge_str:
+            raise EdgeParseError("Cannot parse empty edge string", edge_str=source)
+
         edge_inner_str = edge_str
 
         parens = _edge_str_has_outer_parens(edge_str)
         if parens:
+            # Check for unbalanced outer parens
+            if edge_str[-1] != ')':
+                raise EdgeParseError(
+                    "Unbalanced parentheses: string starts with '(' but does not end with ')'",
+                    edge_str=source
+                )
             edge_inner_str = edge_str[1:-1]
+
+        # Check for empty parentheses
+        if not edge_inner_str.strip():
+            raise EdgeParseError("Empty parentheses are not a valid edge", edge_str=source)
 
         tokens = split_edge_str(edge_inner_str)
         if not tokens:
-            return None
+            raise EdgeParseError("Failed to parse edge string: no tokens found", edge_str=source)
         edges = tuple(_parsed_token(token) for token in tokens)
         if len(edges) > 1 or type(edges[0]) == Hyperedge:
             return Hyperedge(edges)
         elif len(edges) > 0:
             return Atom(edges[0], parens)
         else:
-            return None
+            raise EdgeParseError("Failed to parse edge string: no edges created", edge_str=source)
+
+    # Handle existing edge passthrough
     elif type(source) in {Hyperedge, Atom, UniqueAtom}:
         return source
+
+    # Invalid type
     else:
-        return None
+        raise ValidationError(
+            f"Cannot create edge from type '{type(source).__name__}'. "
+            "Expected str, tuple, list, or existing edge.",
+            value=source,
+            expected_type="str, tuple, list, Hyperedge, or Atom"
+        )
 
 
 def build_atom(text, *parts):
@@ -720,19 +796,14 @@ class Atom(Hyperedge):
             return atom_str
 
     def label(self):
-        """Generate human-readable label from entity."""
+        """Generate human-readable label from entity.
+
+        Decodes percent-encoded characters back to their original form.
+        Order matters: % must be decoded last to avoid incorrect decoding.
+        """
         label = self.root()
-
-        label = label.replace('%25', '%')
-        label = label.replace('%2f', '/')
-        label = label.replace('%20', ' ')
-        label = label.replace('%28', '(')
-        label = label.replace('%29', ')')
-        label = label.replace('%2e', '.')
-        label = label.replace('%2a', '*')
-        label = label.replace('%26', '&')
-        label = label.replace('%40', '@')
-
+        for encoded, char in _DECODE_CHARS:
+            label = label.replace(encoded, char)
         return label
 
     def inner_atom(self):
