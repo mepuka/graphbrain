@@ -100,12 +100,14 @@ discover patterns, and build domain-specific semantic models.
         from graphbrain.mcp.tools.semantic_classes import register_semantic_class_tools
         from graphbrain.mcp.tools.predicates import register_predicate_tools
         from graphbrain.mcp.tools.feedback import register_feedback_tools
+        from graphbrain.mcp.tools.agents import register_agent_tools
 
         register_hypergraph_tools(self.server)
         register_classification_tools(self.server)
         register_semantic_class_tools(self.server)
         register_predicate_tools(self.server)
         register_feedback_tools(self.server)
+        register_agent_tools(self.server)
 
     def run(self, transport: str = "stdio", **kwargs):
         """Run the MCP server.
