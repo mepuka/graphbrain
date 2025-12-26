@@ -2,6 +2,8 @@
 
 Provides a FastMCP-based server that exposes graphbrain operations
 as tools for use with Claude and other MCP-compatible clients.
+
+Supports both PostgreSQL and SQLite backends.
 """
 
 import logging
@@ -18,22 +20,27 @@ class GraphbrainMCP:
 
     Manages database connections and provides the FastMCP server instance
     with all graphbrain tools registered.
+
+    Supports both PostgreSQL and SQLite backends, automatically detecting
+    the backend type from the connection string.
     """
 
     def __init__(
         self,
-        pg_connection: str,
+        connection_string: str,
         name: str = "graphbrain",
         embedding_model: Optional[str] = None,
     ):
         """Initialize the graphbrain MCP server.
 
         Args:
-            pg_connection: PostgreSQL connection string
+            connection_string: Database connection string or file path.
+                - PostgreSQL: 'postgresql://user:pass@host/db'
+                - SQLite: '/path/to/database.db'
             name: Server name for MCP identification
             embedding_model: Optional sentence transformer model for semantic search
         """
-        self.pg_connection = pg_connection
+        self.connection_string = connection_string
         self.embedding_model = embedding_model or "intfloat/e5-base-v2"
 
         # Initialize FastMCP with lifespan for database connections
@@ -62,22 +69,32 @@ discover patterns, and build domain-specific semantic models.
     async def _lifespan(self, server: FastMCP):
         """Manage database connections during server lifetime."""
         import graphbrain
-        from graphbrain.classification import ClassificationRepository, HybridSearcher
+        from graphbrain.classification.backends import get_classification_backend
+        from graphbrain.classification.search import get_search_backend
 
-        logger.info(f"Connecting to PostgreSQL: {self.pg_connection}")
+        logger.info(f"Connecting to: {self.connection_string}")
 
-        # Initialize hypergraph connection
-        hg = graphbrain.hgraph(self.pg_connection)
+        # Initialize hypergraph connection (works with both SQLite and PostgreSQL)
+        hg = graphbrain.hgraph(self.connection_string)
 
-        # Initialize classification repository
-        repo = ClassificationRepository(self.pg_connection)
+        # Initialize classification backend (auto-detects type)
+        repo = None
+        try:
+            repo = get_classification_backend(self.connection_string)
+            logger.info(f"Classification backend initialized: {type(repo).__name__}")
+        except Exception as e:
+            logger.warning(f"Classification backend initialization failed: {e}")
 
-        # Initialize hybrid searcher (lazy loads embedding model)
+        # Initialize search backend (auto-detects type, lazy loads embedding model)
         searcher = None
         try:
-            searcher = HybridSearcher(self.pg_connection, embedding_model=self.embedding_model)
+            searcher = get_search_backend(
+                self.connection_string,
+                embedding_model=self.embedding_model
+            )
+            logger.info(f"Search backend initialized: {type(searcher).__name__}")
         except Exception as e:
-            logger.warning(f"HybridSearcher initialization failed: {e}")
+            logger.warning(f"Search backend initialization failed: {e}")
 
         # Store in context for tools to access
         yield {
@@ -89,6 +106,8 @@ discover patterns, and build domain-specific semantic models.
         # Cleanup
         logger.info("Closing database connections")
         hg.close()
+        if repo:
+            repo.close()
         if searcher:
             searcher.close()
 
@@ -120,14 +139,16 @@ discover patterns, and build domain-specific semantic models.
 
 
 def create_server(
-    pg_connection: str,
+    connection_string: str,
     name: str = "graphbrain",
     embedding_model: Optional[str] = None,
 ) -> GraphbrainMCP:
     """Create a graphbrain MCP server.
 
     Args:
-        pg_connection: PostgreSQL connection string
+        connection_string: Database connection string or file path.
+            - PostgreSQL: 'postgresql://user:pass@host/db'
+            - SQLite: '/path/to/database.db'
         name: Server name for MCP identification
         embedding_model: Optional sentence transformer model for semantic search
 
@@ -135,14 +156,19 @@ def create_server(
         Configured GraphbrainMCP instance
 
     Example:
+        # PostgreSQL
         server = create_server("postgresql://localhost/graphbrain")
         server.run()  # stdio transport (default)
+
+        # SQLite
+        server = create_server("/path/to/knowledge.db")
+        server.run()
 
         # Or with HTTP transport
         server.run(transport="http", port=8000)
     """
     return GraphbrainMCP(
-        pg_connection=pg_connection,
+        connection_string=connection_string,
         name=name,
         embedding_model=embedding_model,
     )
