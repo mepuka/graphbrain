@@ -91,6 +91,11 @@ class Matcher:
         else:
             match_by_order = True
 
+        # When matching by order, ensure min_len is at least len(pattern)
+        # to prevent index out of range errors
+        if match_by_order:
+            min_len = max(min_len, len(pattern))
+
         if len(edge) < min_len or len(edge) > max_len:
             return []
 

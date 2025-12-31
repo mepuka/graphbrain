@@ -1,3 +1,4 @@
+import logging
 from urllib.parse import urlparse
 
 import progressbar
@@ -5,6 +6,8 @@ import mwparserfromhell
 import requests
 
 from graphbrain.readers.reader import Reader
+
+logger = logging.getLogger(__name__)
 
 
 IGNORE_SECTIONS = {'See also',
@@ -120,4 +123,4 @@ class WikipediaReader(Reader):
                     nedges += len([parse for parse in parse_result['parses'] if parse['main_edge']])
                 i += 1
                 bar.update(i)
-        print(f'{nedges} edges added')
+        logger.info('%d edges added', nedges)

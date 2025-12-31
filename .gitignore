@@ -67,5 +67,10 @@ __pycache__
 *.hg
 *.db
 
+# Environment files #
+#####################
+.env
+.env.local
+
 
 

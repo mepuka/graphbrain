@@ -5,7 +5,7 @@ Provides tools for human-in-the-loop feedback on classifications.
 
 import logging
 import uuid
-from typing import Optional
+from typing import Optional, Union
 from datetime import datetime
 
 from mcp.server.fastmcp import FastMCP
@@ -15,6 +15,28 @@ from graphbrain.mcp.errors import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _to_isoformat(value: Union[datetime, str, None]) -> Optional[str]:
+    """Convert a datetime or string to ISO format string.
+
+    Handles the case where the value might already be a string (e.g., from SQLite)
+    or a datetime object (e.g., from PostgreSQL).
+
+    Args:
+        value: A datetime object, ISO format string, or None
+
+    Returns:
+        ISO format string or None
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    # Fallback for any other type
+    return str(value)
 
 
 def register_feedback_tools(server: FastMCP):
@@ -120,7 +142,7 @@ Returns:
                 "correct_class": feedback.correct_class,
                 "confidence_adjustment": feedback.confidence_adjustment,
                 "reviewer_id": feedback.reviewer_id,
-                "created_at": feedback.created_at.isoformat() if feedback.created_at else None,
+                "created_at": _to_isoformat(feedback.created_at),
             })
 
         logger.info(f"get_pending_reviews: found {len(reviews)} pending reviews")

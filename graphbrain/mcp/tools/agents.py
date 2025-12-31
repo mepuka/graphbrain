@@ -104,7 +104,7 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to create session: {e}")
-            return database_error(str(e))
+            return database_error("create_agent_session", e)
 
     @server.tool(name="get_session_state")
     async def get_session_state(session_id: str) -> dict:
@@ -137,7 +137,7 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to get session: {e}")
-            return database_error(str(e))
+            return database_error("get_session_state", e)
 
     @server.tool(name="update_session_state")
     async def update_session_state(
@@ -197,7 +197,7 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to update session: {e}")
-            return database_error(str(e))
+            return database_error("update_session_state", e)
 
     @server.tool(name="log_decision")
     async def log_decision(
@@ -269,7 +269,7 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to log decision: {e}")
-            return database_error(str(e))
+            return database_error("log_decision", e)
 
     @server.tool(name="get_session_decisions")
     async def get_session_decisions(
@@ -311,7 +311,7 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to get decisions: {e}")
-            return database_error(str(e))
+            return database_error("get_session_decisions", e)
 
     @server.tool(name="decision_stats")
     async def decision_stats(
@@ -350,7 +350,7 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to get stats: {e}")
-            return database_error(str(e))
+            return database_error("decision_stats", e)
 
     @server.tool(name="delete_session")
     async def delete_session(session_id: str) -> dict:
@@ -384,7 +384,7 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to delete session: {e}")
-            return database_error(str(e))
+            return database_error("delete_session", e)
 
     @server.tool(name="list_sessions")
     async def list_sessions(
@@ -444,6 +444,6 @@ def register_agent_tools(server: FastMCP):
 
         except Exception as e:
             logger.error(f"Failed to list sessions: {e}")
-            return database_error(str(e))
+            return database_error("list_sessions", e)
 
     logger.info("Registered 8 agent management tools")

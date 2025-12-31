@@ -84,6 +84,15 @@ def invalid_pattern_error(pattern: str, exception: Exception) -> dict:
     )
 
 
+def invalid_input_error(message: str, details: Optional[dict] = None) -> dict:
+    """Error for invalid input."""
+    return error_response(
+        ErrorCode.INVALID_INPUT,
+        message,
+        details,
+    )
+
+
 def not_found_error(resource_type: str, identifier: str) -> dict:
     """Error for resource not found."""
     return error_response(

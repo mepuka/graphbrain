@@ -1,8 +1,12 @@
+import logging
+
 import progressbar
 from trafilatura import fetch_url, extract, extract_metadata
 
 from graphbrain import hedge
 from graphbrain.readers.reader import Reader
+
+logger = logging.getLogger(__name__)
 
 
 class URLReader(Reader):
@@ -47,9 +51,9 @@ class URLReader(Reader):
                                 if field != 'text':
                                     self.hg.add(hedge([field, edge]))
                     except RuntimeError as e:
-                        print(e)
+                        logger.warning('Error parsing line: %s', e)
                     i += 1
                     bar.update(i)
 
         for field, n in nedges.items():
-            print('{}: {} edges added'.format(field, str(n)))
+            logger.info('%s: %d edges added', field, n)

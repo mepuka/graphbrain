@@ -1,10 +1,13 @@
 import csv
+import logging
 import re
 import sys
 
 import progressbar
 
 from graphbrain.readers.reader import Reader
+
+logger = logging.getLogger(__name__)
 
 
 def file_lines(filename):
@@ -35,7 +38,7 @@ class CsvReader(Reader):
             for part in parts:
                 self.parser.parse_and_add(part, self.hg, sequence=self.sequence, infsrcs=self.infsrcs)
         except TypeError as e:
-            print(e)
+            logger.warning('Error parsing row: %s', e)
 
     def read(self):
         lines = file_lines(self.infile) - 1

@@ -1,19 +1,43 @@
 """SQLite search backend with FTS5 full-text search.
 
 Provides:
-- BM25 ranking via SQLite FTS5
-- Optional in-process semantic similarity
-- Hybrid fusion with configurable weights
+- BM25 ranking via SQLite FTS5 with snippet/highlight support
+- Phrase search, prefix search, and boolean operators
+- Optional in-process semantic similarity with LRU caching
+- Hybrid fusion with configurable weights (weighted sum or RRF)
 """
 
 import json
 import logging
+import re
 import sqlite3
-from typing import Iterator, Optional
+from dataclasses import dataclass
+from typing import Iterator, Optional, TYPE_CHECKING, Literal
 
 from graphbrain.classification.search.base import SearchBackend, SearchResult
+from graphbrain.embeddings.cache import LRUEmbeddingCache
+
+if TYPE_CHECKING:
+    from graphbrain.embeddings.config import EmbeddingConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FTSConfig:
+    """Configuration for FTS5 search behavior."""
+    # Snippet configuration
+    snippet_size: int = 64  # Approximate tokens per snippet
+    highlight_start: str = '<mark>'
+    highlight_end: str = '</mark>'
+    snippet_ellipsis: str = '...'
+
+    # BM25 column weights (key, text_content)
+    bm25_weights: tuple = (0.0, 1.0)
+
+    # Query preprocessing
+    auto_prefix: bool = False  # Auto-add * to words for prefix matching
+    default_operator: Literal['AND', 'OR'] = 'AND'
 
 # Try to import sentence-transformers for semantic search
 try:
@@ -22,6 +46,7 @@ try:
     _SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
     _SENTENCE_TRANSFORMERS_AVAILABLE = False
+    np = None
 
 
 # SQL for creating search tables
@@ -61,16 +86,27 @@ END;
 """
 
 
+@dataclass
+class SearchResultWithSnippet(SearchResult):
+    """Extended search result with snippet support."""
+    snippet: Optional[str] = None
+    highlighted_text: Optional[str] = None
+
+
 class SqliteSearchBackend(SearchBackend):
-    """SQLite search backend using FTS5."""
+    """SQLite search backend using FTS5 with LRU caching for embeddings."""
 
     DEFAULT_MODEL = "intfloat/e5-base-v2"
+    DEFAULT_CACHE_SIZE = 10000
 
     def __init__(
         self,
         db_path: str,
         embedding_model: Optional[str] = None,
         default_weights: Optional[dict] = None,
+        embedding_config: Optional["EmbeddingConfig"] = None,
+        cache_max_size: Optional[int] = None,
+        fts_config: Optional[FTSConfig] = None,
     ):
         """Initialize with SQLite database path.
 
@@ -78,15 +114,32 @@ class SqliteSearchBackend(SearchBackend):
             db_path: Path to SQLite database file
             embedding_model: Sentence transformer model name (optional)
             default_weights: Default fusion weights {"bm25": float, "semantic": float}
+            embedding_config: Optional embedding configuration for cache settings
+            cache_max_size: Maximum number of embeddings to cache (default 10000)
+            fts_config: Optional FTS5 configuration for snippets and highlighting
         """
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Performance pragmas - WAL mode for concurrent access
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        self._conn.execute("PRAGMA cache_size = -32000")  # 32MB cache
 
         self._default_weights = default_weights or self.DEFAULT_WEIGHTS
         self._encoder = None
-        self._model_name = embedding_model or self.DEFAULT_MODEL
-        self._embeddings_cache: dict[str, list[float]] = {}
+        self._fts_config = fts_config or FTSConfig()
+
+        # Use embedding config if provided, otherwise use defaults
+        if embedding_config:
+            self._model_name = embedding_config.model_name
+            max_size = embedding_config.cache_max_size
+        else:
+            self._model_name = embedding_model or self.DEFAULT_MODEL
+            max_size = cache_max_size or self.DEFAULT_CACHE_SIZE
+
+        # Use LRU cache instead of plain dict
+        self._embeddings_cache = LRUEmbeddingCache(max_size=max_size)
 
         self._init_schema()
 
@@ -160,48 +213,186 @@ class SqliteSearchBackend(SearchBackend):
         )
         self._conn.commit()
 
-        # Update cache
+        # Update LRU cache
         if embedding:
-            self._embeddings_cache[edge_key] = embedding
+            self._embeddings_cache.put(edge_key, embedding)
+
+    def _preprocess_query(self, query: str) -> str:
+        """Preprocess query for FTS5.
+
+        Handles:
+        - Phrase search (quoted strings)
+        - Prefix search (word*)
+        - Boolean operators (AND, OR, NOT)
+        - Auto-prefix mode
+        """
+        # If query contains FTS5 operators, use as-is
+        if any(op in query.upper() for op in ['AND', 'OR', 'NOT', 'NEAR']):
+            return query
+
+        # Check for quoted phrases
+        if '"' in query:
+            return query
+
+        # Check for explicit prefix wildcards
+        if '*' in query:
+            return query
+
+        # Apply auto-prefix if configured
+        if self._fts_config.auto_prefix:
+            words = query.split()
+            return ' '.join(f'{word}*' for word in words if word)
+
+        # Default: join words with configured operator
+        words = query.split()
+        if len(words) > 1 and self._fts_config.default_operator == 'AND':
+            return ' AND '.join(words)
+
+        return query
 
     def bm25_search(
         self,
         query: str,
         limit: int = 100,
         min_rank: float = 0.0,
+        return_snippets: bool = False,
+        return_highlights: bool = False,
     ) -> Iterator[SearchResult]:
-        """Search using SQLite FTS5 BM25 ranking."""
+        """Search using SQLite FTS5 BM25 ranking.
+
+        Supports FTS5 query syntax:
+        - Simple words: "hello world" (uses default_operator)
+        - Phrase search: '"exact phrase"'
+        - Prefix search: "hel*" matches words starting with "hel"
+        - Boolean: "hello AND world", "hello OR world", "hello NOT world"
+        - NEAR: "hello NEAR world" (within 10 tokens)
+
+        Args:
+            query: Search query (plain text or FTS5 syntax)
+            limit: Maximum results
+            min_rank: Minimum BM25 score threshold
+            return_snippets: Include highlighted snippets in results
+            return_highlights: Include full highlighted text in results
+        """
         if not self.supports_bm25:
             # Fallback to simple LIKE search
             yield from self._simple_search(query, limit)
             return
 
+        # Preprocess query for FTS5
+        fts_query = self._preprocess_query(query)
+
         try:
-            cur = self._conn.execute(
-                """
-                SELECT edge_key, text_content, bm25(edge_text_fts) as rank
-                FROM edge_text_fts
-                WHERE edge_text_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-                """,
-                (query, limit)
-            )
+            if return_snippets:
+                cur = self._conn.execute(
+                    """
+                    SELECT edge_key, text_content, bm25(edge_text_fts) as rank,
+                           snippet(edge_text_fts, 1, ?, ?, ?, ?) as snippet
+                    FROM edge_text_fts
+                    WHERE edge_text_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (
+                        self._fts_config.highlight_start,
+                        self._fts_config.highlight_end,
+                        self._fts_config.snippet_ellipsis,
+                        self._fts_config.snippet_size,
+                        fts_query,
+                        limit
+                    )
+                )
+            elif return_highlights:
+                cur = self._conn.execute(
+                    """
+                    SELECT edge_key, text_content, bm25(edge_text_fts) as rank,
+                           highlight(edge_text_fts, 1, ?, ?) as highlighted
+                    FROM edge_text_fts
+                    WHERE edge_text_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (
+                        self._fts_config.highlight_start,
+                        self._fts_config.highlight_end,
+                        fts_query,
+                        limit
+                    )
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    SELECT edge_key, text_content, bm25(edge_text_fts) as rank
+                    FROM edge_text_fts
+                    WHERE edge_text_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                    """,
+                    (fts_query, limit)
+                )
+
             for row in cur:
                 # FTS5 bm25() returns negative values (lower is better)
                 # Convert to positive score (higher is better)
                 score = -row["rank"] if row["rank"] else 0.0
                 if score >= min_rank:
-                    yield SearchResult(
-                        edge_key=row["edge_key"],
-                        combined_score=score,
-                        bm25_score=score,
-                        semantic_score=None,
-                        text_content=row["text_content"],
-                    )
+                    if return_snippets or return_highlights:
+                        extra_field = row[3] if len(row) > 3 else None
+                        yield SearchResultWithSnippet(
+                            edge_key=row["edge_key"],
+                            combined_score=score,
+                            bm25_score=score,
+                            semantic_score=None,
+                            text_content=row["text_content"],
+                            snippet=extra_field if return_snippets else None,
+                            highlighted_text=extra_field if return_highlights else None,
+                        )
+                    else:
+                        yield SearchResult(
+                            edge_key=row["edge_key"],
+                            combined_score=score,
+                            bm25_score=score,
+                            semantic_score=None,
+                            text_content=row["text_content"],
+                        )
         except sqlite3.OperationalError as e:
             logger.warning(f"FTS5 search failed: {e}")
             yield from self._simple_search(query, limit)
+
+    def phrase_search(
+        self,
+        phrase: str,
+        limit: int = 100,
+        return_snippets: bool = True,
+    ) -> Iterator[SearchResult]:
+        """Search for an exact phrase.
+
+        Args:
+            phrase: Exact phrase to search for
+            limit: Maximum results
+            return_snippets: Include highlighted snippets
+        """
+        # Wrap in quotes for phrase search
+        fts_query = f'"{phrase}"'
+        yield from self.bm25_search(
+            fts_query,
+            limit=limit,
+            return_snippets=return_snippets,
+        )
+
+    def prefix_search(
+        self,
+        prefix: str,
+        limit: int = 100,
+    ) -> Iterator[SearchResult]:
+        """Search for words starting with a prefix.
+
+        Args:
+            prefix: Word prefix to match
+            limit: Maximum results
+        """
+        fts_query = f'{prefix}*'
+        yield from self.bm25_search(fts_query, limit=limit)
 
     def _simple_search(self, query: str, limit: int) -> Iterator[SearchResult]:
         """Fallback simple text search using LIKE."""
@@ -240,15 +431,15 @@ class SqliteSearchBackend(SearchBackend):
         limit: int = 100,
         min_similarity: float = 0.0,
     ) -> Iterator[SearchResult]:
-        """Search using in-process cosine similarity."""
+        """Search using in-process cosine similarity with LRU caching."""
         if not _SENTENCE_TRANSFORMERS_AVAILABLE:
             return
 
-        # Load embeddings from database if not cached
-        if not self._embeddings_cache:
+        # Load embeddings from database if cache is empty
+        if len(self._embeddings_cache) == 0:
             self._load_embeddings()
 
-        if not self._embeddings_cache:
+        if len(self._embeddings_cache) == 0:
             return
 
         # Compute similarities
@@ -285,18 +476,28 @@ class SqliteSearchBackend(SearchBackend):
             )
 
     def _load_embeddings(self):
-        """Load all embeddings from database into cache."""
+        """Load embeddings from database into LRU cache.
+
+        Loads embeddings in bulk for efficiency. The cache will automatically
+        evict least recently used items if max_size is exceeded.
+        """
         cur = self._conn.execute(
             "SELECT edge_key, embedding FROM edge_text WHERE embedding IS NOT NULL"
         )
+
+        # Collect embeddings for bulk loading
+        embeddings_to_load = {}
         for row in cur:
             try:
                 embedding = json.loads(row["embedding"])
-                self._embeddings_cache[row["edge_key"]] = embedding
+                embeddings_to_load[row["edge_key"]] = embedding
             except json.JSONDecodeError:
                 pass
 
-        logger.info(f"Loaded {len(self._embeddings_cache)} embeddings into cache")
+        # Bulk load into cache
+        if embeddings_to_load:
+            count = self._embeddings_cache.load_bulk(embeddings_to_load)
+            logger.info(f"Loaded {count} embeddings into LRU cache (max_size={self._embeddings_cache.max_size})")
 
     def search(
         self,
@@ -391,7 +592,7 @@ class SqliteSearchBackend(SearchBackend):
         return combined[:limit]
 
     def get_stats(self) -> dict:
-        """Get search statistics."""
+        """Get search statistics including LRU cache metrics."""
         stats = {}
 
         try:
@@ -409,6 +610,13 @@ class SqliteSearchBackend(SearchBackend):
             stats["edges_with_embedding"] = 0
 
         stats["fts5_available"] = self.supports_bm25
-        stats["embeddings_cached"] = len(self._embeddings_cache)
+
+        # Include LRU cache statistics
+        cache_stats = self._embeddings_cache.get_stats()
+        stats["embeddings_cached"] = cache_stats["size"]
+        stats["cache_max_size"] = cache_stats["max_size"]
+        stats["cache_hit_rate"] = cache_stats["hit_rate"]
+        stats["cache_hits"] = cache_stats["hits"]
+        stats["cache_misses"] = cache_stats["misses"]
 
         return stats

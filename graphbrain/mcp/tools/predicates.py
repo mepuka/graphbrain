@@ -105,8 +105,12 @@ Returns:
         description="""
 Find predicates similar to a given predicate.
 
-Uses trigram similarity (pg_trgm) to find lexically similar predicates.
-Useful for finding related predicates that might belong to the same class.
+Uses lexical similarity to find related predicates that might belong
+to the same semantic class. Useful for predicate discovery and expansion.
+
+Backend-specific behavior:
+- PostgreSQL: Uses pg_trgm trigram similarity (fast, index-backed)
+- SQLite: Uses LIKE queries + Python's SequenceMatcher (reasonable fallback)
 
 Args:
     predicate: Reference predicate lemma
@@ -116,6 +120,7 @@ Returns:
   - reference: the input predicate
   - similar: list of {lemma, class_name, class_id, is_seed, frequency}
   - total: number of similar predicates found
+  - backend: which backend implementation was used
 """,
     )
     async def find_similar_predicates(
@@ -128,6 +133,15 @@ Returns:
         ctx = server.get_context()
         lifespan_data = ctx.request_context.lifespan_context
         repo = lifespan_data["repo"]
+
+        # Detect backend type for response
+        backend_type = type(repo).__name__
+        if "Sqlite" in backend_type:
+            backend = "sqlite"
+        elif "Postgres" in backend_type:
+            backend = "postgresql"
+        else:
+            backend = "unknown"
 
         similar = []
         try:
@@ -142,15 +156,16 @@ Returns:
                     "frequency": entry.frequency,
                 })
         except Exception as e:
-            logger.warning(f"find_similar_predicates: trigram search failed - {e}")
-            return service_unavailable_error("trigram_search", str(e))
+            logger.warning(f"find_similar_predicates: similarity search failed - {e}")
+            return service_unavailable_error("similarity_search", str(e))
 
-        logger.info(f"find_similar_predicates: found {len(similar)} similar to '{predicate}'")
+        logger.info(f"find_similar_predicates: found {len(similar)} similar to '{predicate}' (backend={backend})")
         return {
             "status": "success",
             "reference": predicate,
             "similar": similar,
             "total": len(similar),
+            "backend": backend,
         }
 
     @server.tool(

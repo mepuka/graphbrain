@@ -2,14 +2,14 @@
 
 Uses psycopg2 for PostgreSQL connection and supports:
 - JSONB for hybrid_weights
-- pgvector for embeddings (optional)
+- pgvector for embeddings (optional, with HNSW or IVFFlat indexes)
 - pg_trgm for fuzzy predicate search (optional)
 """
 
 import json
 import logging
 from datetime import datetime
-from typing import Iterator, Optional
+from typing import Iterator, Optional, TYPE_CHECKING
 
 from graphbrain.classification.backends.base import ClassificationBackend
 from graphbrain.classification.models import (
@@ -19,6 +19,9 @@ from graphbrain.classification.models import (
     EdgeClassification,
     ClassificationFeedback,
 )
+
+if TYPE_CHECKING:
+    from graphbrain.embeddings.config import EmbeddingConfig
 
 try:
     import psycopg2
@@ -112,24 +115,100 @@ CREATE TABLE IF NOT EXISTS classification_feedback (
 CREATE INDEX IF NOT EXISTS idx_cf_status ON classification_feedback (status);
 """
 
-# Optional: Add embedding columns if pgvector is available
-_ADD_EMBEDDING_COLUMNS = """
+# Template for adding embedding columns - dimensions filled in at runtime
+_ADD_EMBEDDING_COLUMNS_TEMPLATE = """
 DO $$
 BEGIN
     -- Add embedding column to semantic_classes
-    ALTER TABLE semantic_classes ADD COLUMN IF NOT EXISTS embedding vector(768);
-    CREATE INDEX IF NOT EXISTS idx_sc_embedding
-        ON semantic_classes USING ivfflat (embedding vector_cosine_ops);
-
+    ALTER TABLE semantic_classes ADD COLUMN IF NOT EXISTS embedding vector({dimensions});
     -- Add embedding column to predicate_banks
-    ALTER TABLE predicate_banks ADD COLUMN IF NOT EXISTS embedding vector(768);
-    CREATE INDEX IF NOT EXISTS idx_pb_embedding
-        ON predicate_banks USING ivfflat (embedding vector_cosine_ops);
+    ALTER TABLE predicate_banks ADD COLUMN IF NOT EXISTS embedding vector({dimensions});
 EXCEPTION
     WHEN OTHERS THEN
         RAISE NOTICE 'Could not add embedding columns (pgvector may not be available)';
 END $$;
 """
+
+
+def _get_pgvector_version(conn) -> Optional[tuple]:
+    """Get the installed pgvector version as a tuple.
+
+    Returns:
+        Version tuple (major, minor, patch) or None if not available.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT extversion FROM pg_extension WHERE extname = 'vector'
+            """)
+            row = cur.fetchone()
+            if row:
+                version_str = row[0]
+                parts = version_str.split('.')
+                return tuple(int(p) for p in parts[:3])
+    except Exception:
+        pass
+    return None
+
+
+def _get_classification_embedding_index_sql(
+    table: str,
+    index_type: str,
+    distance_metric: str,
+    hnsw_m: int = 16,
+    hnsw_ef_construction: int = 64,
+    ivfflat_lists: int = 100,
+) -> str:
+    """Generate SQL for creating a vector index on classification tables.
+
+    Args:
+        table: Table name ('semantic_classes' or 'predicate_banks')
+        index_type: 'hnsw', 'ivfflat', or 'none'
+        distance_metric: 'cosine', 'l2', or 'inner_product'
+        hnsw_m: HNSW max connections per layer
+        hnsw_ef_construction: HNSW construction exploration factor
+        ivfflat_lists: Number of IVFFlat clusters
+
+    Returns:
+        SQL CREATE INDEX statement, or empty string if index_type is 'none'.
+    """
+    if index_type == "none":
+        return ""
+
+    ops_map = {
+        "cosine": "vector_cosine_ops",
+        "l2": "vector_l2_ops",
+        "inner_product": "vector_ip_ops",
+    }
+    ops_class = ops_map.get(distance_metric, "vector_cosine_ops")
+    prefix = "sc" if table == "semantic_classes" else "pb"
+
+    if index_type == "hnsw":
+        return f"""
+DO $$
+BEGIN
+    CREATE INDEX IF NOT EXISTS idx_{prefix}_embedding_hnsw
+        ON {table} USING hnsw (embedding {ops_class})
+        WITH (m = {hnsw_m}, ef_construction = {hnsw_ef_construction});
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Could not create HNSW index on {table}: %', SQLERRM;
+END $$;
+"""
+    elif index_type == "ivfflat":
+        return f"""
+DO $$
+BEGIN
+    CREATE INDEX IF NOT EXISTS idx_{prefix}_embedding_ivfflat
+        ON {table} USING ivfflat (embedding {ops_class})
+        WITH (lists = {ivfflat_lists});
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Could not create IVFFlat index on {table}: %', SQLERRM;
+END $$;
+"""
+    else:
+        return ""
 
 # Add trigram index for fuzzy search
 _ADD_TRGM_INDEX = """
@@ -145,13 +224,23 @@ END $$;
 
 
 class PostgresBackend(ClassificationBackend):
-    """PostgreSQL backend for classification storage."""
+    """PostgreSQL backend for classification storage.
 
-    def __init__(self, connection_string: str):
+    Supports configurable embedding dimensions and index types (HNSW or IVFFlat).
+    HNSW indexes require pgvector >= 0.5.0; falls back to IVFFlat automatically.
+    """
+
+    def __init__(
+        self,
+        connection_string: str,
+        embedding_config: Optional["EmbeddingConfig"] = None,
+    ):
         """Initialize with PostgreSQL connection.
 
         Args:
             connection_string: PostgreSQL connection URI
+            embedding_config: Optional embedding configuration for pgvector setup.
+                             If not provided, uses default 768-dim with HNSW index.
         """
         if not _PSYCOPG2_AVAILABLE:
             raise ImportError("psycopg2 not available. Install with: pip install psycopg2-binary")
@@ -163,15 +252,63 @@ class PostgresBackend(ClassificationBackend):
         self._conn_string = connection_string
         self._conn = psycopg2.connect(connection_string)
         self._conn.autocommit = True
+
+        # Store embedding config (create default if not provided)
+        if embedding_config is None:
+            from graphbrain.embeddings.config import EmbeddingConfig
+            embedding_config = EmbeddingConfig()
+        self.embedding_config = embedding_config
+
+        # Track pgvector version
+        self._pgvector_version: Optional[tuple] = None
+
         self._init_schema()
 
     def _init_schema(self):
         """Initialize database schema."""
         with self._conn.cursor() as cur:
             cur.execute(_CREATE_CLASSIFICATION_SCHEMA)
-            cur.execute(_ADD_EMBEDDING_COLUMNS)
+
+            # Check pgvector version for index type selection
+            self._pgvector_version = _get_pgvector_version(self._conn)
+
+            # Determine index type (fall back to ivfflat if HNSW not supported)
+            index_type = self.embedding_config.index_type
+            if index_type == "hnsw" and self._pgvector_version:
+                # HNSW requires pgvector >= 0.5.0
+                if self._pgvector_version < (0, 5, 0):
+                    logger.warning(
+                        f"pgvector {'.'.join(map(str, self._pgvector_version))} "
+                        "doesn't support HNSW; falling back to IVFFlat"
+                    )
+                    index_type = "ivfflat"
+
+            # Add embedding columns
+            add_columns_sql = _ADD_EMBEDDING_COLUMNS_TEMPLATE.format(
+                dimensions=self.embedding_config.dimensions
+            )
+            cur.execute(add_columns_sql)
+
+            # Create indexes for both tables
+            for table in ["semantic_classes", "predicate_banks"]:
+                index_sql = _get_classification_embedding_index_sql(
+                    table=table,
+                    index_type=index_type,
+                    distance_metric=self.embedding_config.distance_metric,
+                    hnsw_m=self.embedding_config.hnsw_m,
+                    hnsw_ef_construction=self.embedding_config.hnsw_ef_construction,
+                    ivfflat_lists=self.embedding_config.ivfflat_lists,
+                )
+                if index_sql:
+                    cur.execute(index_sql)
+
             cur.execute(_ADD_TRGM_INDEX)
-        logger.debug("Classification schema initialized")
+
+        logger.debug(
+            f"Classification schema initialized (pgvector: "
+            f"{'.'.join(map(str, self._pgvector_version)) if self._pgvector_version else 'not available'}, "
+            f"index: {index_type})"
+        )
 
     def close(self):
         """Close the database connection."""

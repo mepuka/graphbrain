@@ -26,7 +26,7 @@ def register_hypergraph_tools(server: FastMCP):
         description="""
 Search for edges in the hypergraph by text content.
 
-Uses PostgreSQL full-text search (BM25-like ranking) to find edges
+Uses full-text search (BM25-like ranking) to find edges
 containing the query terms. Results are sorted by relevance score.
 
 Returns:
@@ -44,38 +44,34 @@ Returns:
 
         ctx = server.get_context()
         lifespan_data = ctx.request_context.lifespan_context
-        hg = lifespan_data["hg"]
+        searcher = lifespan_data.get("searcher")
+
+        if not searcher:
+            return {
+                "status": "error",
+                "code": "service_unavailable",
+                "message": "Search backend not available. Text content may not be indexed.",
+                "edges": [],
+                "total": 0,
+                "query": query,
+            }
 
         results = []
         count = 0
 
         try:
-            # Use the edges table text search with dynamic tsvector
-            with hg._conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT edge_key, text_content,
-                           ts_rank(to_tsvector('english', COALESCE(text_content, '')),
-                                   plainto_tsquery('english', %s)) as rank
-                    FROM edges
-                    WHERE to_tsvector('english', COALESCE(text_content, ''))
-                          @@ plainto_tsquery('english', %s)
-                    ORDER BY rank DESC
-                    LIMIT %s
-                    """,
-                    (query, query, limit)
-                )
-                for row in cur:
-                    results.append({
-                        "edge": row[0],
-                        "text": row[1],
-                        "score": float(row[2]) if row[2] else 0.0,
-                    })
-                    count += 1
+            # Use the search backend's BM25 search
+            for result in searcher.bm25_search(query, limit=limit):
+                results.append({
+                    "edge": result.edge_key,
+                    "text": result.text_content,
+                    "score": float(result.bm25_score) if result.bm25_score else 0.0,
+                })
+                count += 1
 
             logger.info(f"search_edges: found {count} results for '{query}'")
         except Exception as e:
-            logger.error(f"search_edges: database error - {e}")
+            logger.error(f"search_edges: search error - {e}")
             return database_error("search_edges", e)
 
         return {
@@ -100,12 +96,19 @@ Pattern examples:
 
 Special pattern symbols:
 - * : Match any single atom or edge
+- . : Match any single atom only
+- (*) : Match any edge only
 - */T : Match any atom of type T (Pd=predicate, Cp=proper concept, etc.)
 - {xy} : Require argument roles x and y
-- @VAR : Capture to variable VAR
+- ... : Open-ended pattern (matches additional elements)
+
+Variable capture (use uppercase names):
+- *VAR : Capture any entity to VAR
+- .VAR : Capture any atom to VAR
+- (VAR) : Capture any edge to VAR
 
 Returns:
-  - edges: list of {edge, bindings} where bindings maps @VAR to matched values
+  - edges: list of {edge, bindings} where bindings maps VAR names to matched values
   - pattern: the pattern used
   - total: number of matches found
 """,
@@ -202,6 +205,13 @@ Args:
         # Add text content if provided
         if text:
             hg.set_attribute(parsed_edge, "text", text)
+            # Also index for full-text search
+            searcher = lifespan_data.get("searcher")
+            if searcher:
+                try:
+                    searcher.add_text(parsed_edge.to_str(), text)
+                except Exception as e:
+                    logger.warning(f"add_edge: failed to index text - {e}")
 
         logger.info(f"add_edge: {'updated' if existed else 'added'} edge")
         return {

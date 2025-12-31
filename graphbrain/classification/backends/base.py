@@ -82,8 +82,12 @@ class ClassificationBackend(ABC):
     def find_similar_predicates(self, lemma: str, limit: int = 10) -> Iterator[PredicateBankEntry]:
         """Find predicates similar to the given lemma.
 
-        Default implementation returns empty iterator.
-        PostgreSQL uses trigram similarity, SQLite can use Levenshtein.
+        Backend-specific implementations:
+        - PostgreSQL: Uses pg_trgm trigram similarity (fast, index-backed)
+        - SQLite: Uses LIKE queries + Python's difflib.SequenceMatcher
+
+        Default implementation returns empty iterator for backends that
+        don't support similarity search.
         """
         return iter([])
 

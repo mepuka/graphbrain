@@ -1,8 +1,11 @@
+import logging
 from collections import Counter
 
 import progressbar
 
 from graphbrain import hedge
+
+logger = logging.getLogger(__name__)
 from graphbrain.utils.corefs import main_coref
 from graphbrain.processor import Processor
 from graphbrain.utils.concepts import has_proper_concept, strip_concept
@@ -109,7 +112,7 @@ class Claims(Processor):
         self.male = set()
         self.non_human = set()
 
-        print('assigning genders')
+        logger.info('assigning genders')
         i = 0
         with progressbar.ProgressBar(max_value=len(self.actors)) as bar:
             for actor in self.actors:
@@ -132,7 +135,7 @@ class Claims(Processor):
                 bar.update(i)
 
         # write claims
-        print('writing claims')
+        logger.info('writing claims')
         i = 0
         with progressbar.ProgressBar(max_value=len(self.claims)) as bar:
             for claim_data in self.claims:
@@ -154,11 +157,9 @@ class Claims(Processor):
                         resolve = actor in self.non_human
 
                     if resolve:
-                        print('ANAPHORA')
-                        print('actor: {}'.format(actor))
-                        print('before: {}'.format(claim))
+                        logger.debug('ANAPHORA resolution: actor=%s, before=%s', actor, claim)
                         claim = replace_subject(claim, actor)
-                        print('after: {}'.format(claim))
+                        logger.debug('ANAPHORA resolution: after=%s', claim)
                         self.anaphoras += 1
 
                 # write claim

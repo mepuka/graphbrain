@@ -1,3 +1,8 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 class Processor:
     def __init__(self, hg, sequence=None):
         self.hg = hg
@@ -20,4 +25,4 @@ class Processor:
             for edge in self.hg.sequence(self.sequence):
                 self.process_edge(edge)
         self.on_end()
-        print(self.report())
+        logger.info(self.report())

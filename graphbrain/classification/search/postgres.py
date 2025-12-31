@@ -4,12 +4,16 @@ Provides:
 - BM25-like full-text search via ts_rank
 - Semantic similarity via pgvector cosine distance
 - Hybrid fusion with configurable weights or RRF
+- Database-layer hybrid fusion for optimal performance
 """
 
 import logging
-from typing import Iterator, Optional
+from typing import Iterator, Optional, TYPE_CHECKING
 
 from graphbrain.classification.search.base import SearchBackend, SearchResult
+
+if TYPE_CHECKING:
+    from graphbrain.embeddings.config import EmbeddingConfig
 
 try:
     import psycopg2
@@ -26,8 +30,128 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+# SQL template for database-layer hybrid search with RRF
+_HYBRID_RRF_SQL = """
+WITH bm25_ranked AS (
+    SELECT
+        edge_key,
+        text_content,
+        ts_rank(to_tsvector('english', COALESCE(text_content, '')),
+                plainto_tsquery('english', %(query)s)) as bm25_score,
+        ROW_NUMBER() OVER (
+            ORDER BY ts_rank(to_tsvector('english', COALESCE(text_content, '')),
+                            plainto_tsquery('english', %(query)s)) DESC
+        ) as bm25_rank
+    FROM edges
+    WHERE to_tsvector('english', COALESCE(text_content, ''))
+          @@ plainto_tsquery('english', %(query)s)
+    LIMIT %(prefetch_limit)s
+),
+semantic_ranked AS (
+    SELECT
+        edge_key,
+        text_content,
+        1 - (embedding {distance_op} %(embedding)s::vector) as semantic_score,
+        ROW_NUMBER() OVER (
+            ORDER BY embedding {distance_op} %(embedding)s::vector
+        ) as semantic_rank
+    FROM edges
+    WHERE embedding IS NOT NULL
+    LIMIT %(prefetch_limit)s
+),
+combined AS (
+    SELECT
+        COALESCE(b.edge_key, s.edge_key) as edge_key,
+        COALESCE(b.text_content, s.text_content) as text_content,
+        b.bm25_score,
+        s.semantic_score,
+        COALESCE(b.bm25_rank, %(prefetch_limit)s + 1) as bm25_rank,
+        COALESCE(s.semantic_rank, %(prefetch_limit)s + 1) as semantic_rank
+    FROM bm25_ranked b
+    FULL OUTER JOIN semantic_ranked s ON b.edge_key = s.edge_key
+)
+SELECT
+    edge_key,
+    text_content,
+    bm25_score,
+    semantic_score,
+    (%(bm25_weight)s / (%(rrf_k)s + bm25_rank) +
+     %(semantic_weight)s / (%(rrf_k)s + semantic_rank)) as rrf_score
+FROM combined
+ORDER BY rrf_score DESC
+LIMIT %(limit)s
+"""
+
+# SQL template for database-layer weighted sum hybrid search
+_HYBRID_WEIGHTED_SQL = """
+WITH bm25_results AS (
+    SELECT
+        edge_key,
+        text_content,
+        ts_rank(to_tsvector('english', COALESCE(text_content, '')),
+                plainto_tsquery('english', %(query)s)) as bm25_score
+    FROM edges
+    WHERE to_tsvector('english', COALESCE(text_content, ''))
+          @@ plainto_tsquery('english', %(query)s)
+    LIMIT %(prefetch_limit)s
+),
+semantic_results AS (
+    SELECT
+        edge_key,
+        text_content,
+        1 - (embedding {distance_op} %(embedding)s::vector) as semantic_score
+    FROM edges
+    WHERE embedding IS NOT NULL
+    LIMIT %(prefetch_limit)s
+),
+bm25_normalized AS (
+    SELECT
+        edge_key,
+        text_content,
+        bm25_score,
+        bm25_score / NULLIF(MAX(bm25_score) OVER (), 0) as bm25_norm
+    FROM bm25_results
+),
+semantic_normalized AS (
+    SELECT
+        edge_key,
+        text_content,
+        semantic_score,
+        semantic_score / NULLIF(MAX(semantic_score) OVER (), 0) as semantic_norm
+    FROM semantic_results
+),
+combined AS (
+    SELECT
+        COALESCE(b.edge_key, s.edge_key) as edge_key,
+        COALESCE(b.text_content, s.text_content) as text_content,
+        b.bm25_score,
+        s.semantic_score,
+        COALESCE(b.bm25_norm, 0) as bm25_norm,
+        COALESCE(s.semantic_norm, 0) as semantic_norm
+    FROM bm25_normalized b
+    FULL OUTER JOIN semantic_normalized s ON b.edge_key = s.edge_key
+)
+SELECT
+    edge_key,
+    text_content,
+    bm25_score,
+    semantic_score,
+    (%(bm25_weight)s * bm25_norm + %(semantic_weight)s * semantic_norm) as combined_score
+FROM combined
+ORDER BY combined_score DESC
+LIMIT %(limit)s
+"""
+
+
 class PostgresSearchBackend(SearchBackend):
-    """PostgreSQL search backend using tsvector and pgvector."""
+    """PostgreSQL search backend using tsvector and pgvector.
+
+    Supports:
+    - BM25-like full-text search via ts_rank
+    - Semantic similarity via pgvector with configurable distance metrics
+    - Hybrid fusion with configurable weights or RRF
+    - Optional database-layer hybrid fusion for optimal performance
+    """
 
     DEFAULT_MODEL = "intfloat/e5-base-v2"
 
@@ -36,6 +160,7 @@ class PostgresSearchBackend(SearchBackend):
         connection_string: str,
         embedding_model: Optional[str] = None,
         default_weights: Optional[dict] = None,
+        embedding_config: Optional["EmbeddingConfig"] = None,
     ):
         """Initialize with PostgreSQL connection.
 
@@ -43,6 +168,7 @@ class PostgresSearchBackend(SearchBackend):
             connection_string: PostgreSQL connection URI
             embedding_model: Sentence transformer model name (optional)
             default_weights: Default fusion weights {"bm25": float, "semantic": float}
+            embedding_config: Optional embedding configuration for distance metrics
         """
         if not _PSYCOPG2_AVAILABLE:
             raise ImportError("psycopg2 not available. Install with: pip install psycopg2-binary")
@@ -57,8 +183,25 @@ class PostgresSearchBackend(SearchBackend):
 
         self._default_weights = default_weights or self.DEFAULT_WEIGHTS
         self._encoder = None
-        self._model_name = embedding_model or self.DEFAULT_MODEL
+
+        # Use embedding config if provided
+        if embedding_config:
+            self._model_name = embedding_config.model_name
+            self._distance_metric = embedding_config.distance_metric
+        else:
+            self._model_name = embedding_model or self.DEFAULT_MODEL
+            self._distance_metric = "cosine"
+
         self._has_pgvector = self._check_pgvector()
+
+    def _get_distance_operator(self) -> str:
+        """Get the pgvector distance operator for the configured metric."""
+        ops_map = {
+            "cosine": "<=>",
+            "l2": "<->",
+            "inner_product": "<#>",
+        }
+        return ops_map.get(self._distance_metric, "<=>")
 
     def _check_pgvector(self) -> bool:
         """Check if pgvector extension is available."""
@@ -136,33 +279,81 @@ class PostgresSearchBackend(SearchBackend):
         limit: int = 100,
         min_similarity: float = 0.0,
     ) -> Iterator[SearchResult]:
-        """Search using pgvector semantic similarity."""
+        """Search using pgvector semantic similarity with configurable distance metric."""
         if not self._has_pgvector:
             logger.warning("pgvector not available, skipping semantic search")
             return
 
+        distance_op = self._get_distance_operator()
+
         with self._conn.cursor() as cur:
             try:
-                cur.execute(
-                    """
-                    SELECT edge_key, text_content,
-                           1 - (embedding <=> %s::vector) as similarity
-                    FROM edges
-                    WHERE embedding IS NOT NULL
-                      AND 1 - (embedding <=> %s::vector) >= %s
-                    ORDER BY embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (embedding, embedding, min_similarity, embedding, limit)
-                )
-                for row in cur:
-                    yield SearchResult(
-                        edge_key=row[0],
-                        combined_score=row[2],
-                        bm25_score=None,
-                        semantic_score=row[2],
-                        text_content=row[1],
+                # Build query based on distance metric
+                if self._distance_metric == "cosine":
+                    # Cosine distance: 1 - distance = similarity
+                    cur.execute(
+                        f"""
+                        SELECT edge_key, text_content,
+                               1 - (embedding {distance_op} %s::vector) as similarity
+                        FROM edges
+                        WHERE embedding IS NOT NULL
+                          AND 1 - (embedding {distance_op} %s::vector) >= %s
+                        ORDER BY embedding {distance_op} %s::vector
+                        LIMIT %s
+                        """,
+                        (embedding, embedding, min_similarity, embedding, limit)
                     )
+                elif self._distance_metric == "l2":
+                    # L2 distance: lower is more similar, convert with exp(-distance)
+                    cur.execute(
+                        f"""
+                        SELECT edge_key, text_content,
+                               EXP(-(embedding {distance_op} %s::vector)) as similarity
+                        FROM edges
+                        WHERE embedding IS NOT NULL
+                        ORDER BY embedding {distance_op} %s::vector
+                        LIMIT %s
+                        """,
+                        (embedding, embedding, limit)
+                    )
+                elif self._distance_metric == "inner_product":
+                    # Inner product: negative inner product operator, negate for similarity
+                    cur.execute(
+                        f"""
+                        SELECT edge_key, text_content,
+                               -(embedding {distance_op} %s::vector) as similarity
+                        FROM edges
+                        WHERE embedding IS NOT NULL
+                        ORDER BY embedding {distance_op} %s::vector
+                        LIMIT %s
+                        """,
+                        (embedding, embedding, limit)
+                    )
+                else:
+                    # Default to cosine
+                    cur.execute(
+                        """
+                        SELECT edge_key, text_content,
+                               1 - (embedding <=> %s::vector) as similarity
+                        FROM edges
+                        WHERE embedding IS NOT NULL
+                          AND 1 - (embedding <=> %s::vector) >= %s
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (embedding, embedding, min_similarity, embedding, limit)
+                    )
+
+                for row in cur:
+                    similarity = row[2]
+                    if similarity >= min_similarity:
+                        yield SearchResult(
+                            edge_key=row[0],
+                            combined_score=similarity,
+                            bm25_score=None,
+                            semantic_score=similarity,
+                            text_content=row[1],
+                        )
             except psycopg2.Error as e:
                 logger.warning(f"Semantic search failed: {e}")
 
@@ -298,6 +489,84 @@ class PostgresSearchBackend(SearchBackend):
         """Build a BM25 query from a list of predicates."""
         return " | ".join(predicates)
 
+    def search_hybrid_db(
+        self,
+        query: str,
+        weights: Optional[dict] = None,
+        limit: int = 100,
+        use_rrf: bool = True,
+        rrf_k: int = 60,
+    ) -> list[SearchResult]:
+        """Database-layer hybrid search combining BM25 and semantic in a single query.
+
+        This method performs the entire hybrid search in PostgreSQL, avoiding
+        multiple round-trips and Python-side fusion. It's more efficient for
+        large result sets but requires pgvector for semantic search.
+
+        Args:
+            query: Search query text
+            weights: Fusion weights {"bm25": float, "semantic": float}
+            limit: Maximum number of results
+            use_rrf: Use Reciprocal Rank Fusion (True) or weighted sum (False)
+            rrf_k: RRF constant (default 60, only used if use_rrf=True)
+
+        Returns:
+            List of SearchResults sorted by combined/RRF score
+        """
+        if not self.supports_semantic_search:
+            # Fall back to regular search if pgvector not available
+            return self.search(query, weights=weights, limit=limit, use_rrf=use_rrf, rrf_k=rrf_k)
+
+        weights = weights or self._default_weights
+        bm25_weight = weights.get("bm25", 0.3)
+        semantic_weight = weights.get("semantic", 0.7)
+
+        # Generate query embedding
+        try:
+            query_embedding = self.encode(query)
+        except ImportError:
+            logger.warning("Semantic encoding not available, falling back to BM25 only")
+            return list(self.bm25_search(query, limit=limit))
+
+        distance_op = self._get_distance_operator()
+        prefetch_limit = limit * 3  # Prefetch more for better fusion
+
+        # Choose SQL template based on fusion method
+        if use_rrf:
+            sql_template = _HYBRID_RRF_SQL.format(distance_op=distance_op)
+        else:
+            sql_template = _HYBRID_WEIGHTED_SQL.format(distance_op=distance_op)
+
+        params = {
+            "query": query,
+            "embedding": query_embedding,
+            "limit": limit,
+            "prefetch_limit": prefetch_limit,
+            "bm25_weight": bm25_weight,
+            "semantic_weight": semantic_weight,
+            "rrf_k": rrf_k,
+        }
+
+        results = []
+        with self._conn.cursor() as cur:
+            try:
+                cur.execute(sql_template, params)
+                for row in cur:
+                    score_column = "rrf_score" if use_rrf else "combined_score"
+                    results.append(SearchResult(
+                        edge_key=row[0],
+                        text_content=row[1],
+                        bm25_score=row[2],
+                        semantic_score=row[3],
+                        combined_score=row[4],
+                    ))
+            except psycopg2.Error as e:
+                logger.warning(f"Database-layer hybrid search failed: {e}")
+                # Fall back to regular search
+                return self.search(query, weights=weights, limit=limit, use_rrf=use_rrf, rrf_k=rrf_k)
+
+        return results
+
     def get_stats(self) -> dict:
         """Get search statistics."""
         stats = {}
@@ -316,5 +585,6 @@ class PostgresSearchBackend(SearchBackend):
                 stats["edges_with_embedding"] = 0
 
             stats["pgvector_available"] = self._has_pgvector
+            stats["distance_metric"] = self._distance_metric
 
         return stats

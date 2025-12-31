@@ -1,10 +1,11 @@
 """SQLite backend for classification storage.
 
 Provides the same interface as PostgreSQL backend but using SQLite.
-Some features degrade gracefully:
-- No trigram fuzzy search (returns empty for find_similar_predicates)
-- Embeddings stored as JSON text (no vector operations)
-- hybrid_weights stored as JSON text
+Some features use fallback implementations:
+- Fuzzy search: Uses LIKE queries + Python's difflib.SequenceMatcher
+  instead of PostgreSQL's pg_trgm trigram similarity
+- Embeddings: Stored as JSON text (no native vector operations)
+- hybrid_weights: Stored as JSON text
 """
 
 import json
@@ -61,6 +62,8 @@ CREATE TABLE IF NOT EXISTS predicate_banks (
 
 CREATE INDEX IF NOT EXISTS idx_pb_class ON predicate_banks (class_id);
 CREATE INDEX IF NOT EXISTS idx_pb_lemma ON predicate_banks (lemma);
+-- Composite index for predicate frequency queries
+CREATE INDEX IF NOT EXISTS idx_pb_class_freq ON predicate_banks (class_id, frequency DESC);
 
 -- Pattern definitions
 CREATE TABLE IF NOT EXISTS class_patterns (
@@ -92,6 +95,8 @@ CREATE TABLE IF NOT EXISTS edge_classifications (
 CREATE INDEX IF NOT EXISTS idx_ec_edge ON edge_classifications (edge_key);
 CREATE INDEX IF NOT EXISTS idx_ec_class ON edge_classifications (class_id);
 CREATE INDEX IF NOT EXISTS idx_ec_confidence ON edge_classifications (confidence DESC);
+-- Composite index for get_edges_by_class with confidence filter
+CREATE INDEX IF NOT EXISTS idx_ec_class_conf ON edge_classifications (class_id, confidence DESC);
 
 -- Classification feedback for active learning
 CREATE TABLE IF NOT EXISTS classification_feedback (
@@ -122,7 +127,10 @@ class SqliteBackend(ClassificationBackend):
         self._db_path = db_path
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # Enable foreign keys
+        # Performance pragmas - WAL mode for concurrent access
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA synchronous = NORMAL")
+        self._conn.execute("PRAGMA cache_size = -32000")  # 32MB cache
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._init_schema()
 
@@ -411,12 +419,72 @@ class SqliteBackend(ClassificationBackend):
     def find_similar_predicates(self, lemma: str, limit: int = 10) -> Iterator[PredicateBankEntry]:
         """Find predicates similar to the given lemma.
 
-        SQLite doesn't have trigram similarity, so this returns an empty iterator.
-        Could implement Levenshtein distance in Python if needed.
+        SQLite doesn't have pg_trgm, so we use a combination of:
+        1. LIKE queries for prefix/substring matching
+        2. Python's difflib.SequenceMatcher for fuzzy similarity scoring
+
+        This provides reasonable results for finding similar predicates,
+        though not as sophisticated as PostgreSQL's trigram similarity.
         """
-        # No trigram support in SQLite - return empty
-        logger.debug(f"find_similar_predicates not supported in SQLite backend for: {lemma}")
-        return iter([])
+        from difflib import SequenceMatcher
+
+        logger.debug(f"find_similar_predicates (SQLite fallback) for: {lemma}")
+
+        # First, get all predicates that might be similar
+        # Use LIKE for basic substring matching to reduce candidates
+        candidates = []
+
+        # Strategy 1: Exact prefix match (e.g., "say" matches "saying")
+        # Strategy 2: Contains the query (e.g., "say" matches "unsay")
+        # Strategy 3: Query contains the predicate (e.g., "saying" matches "say")
+        cur = self._conn.execute(
+            """
+            SELECT id, class_id, lemma, similarity_score, frequency, is_seed, embedding, created_at
+            FROM predicate_banks
+            WHERE lemma LIKE ? || '%'
+               OR lemma LIKE '%' || ?
+               OR ? LIKE lemma || '%'
+            """,
+            (lemma, lemma, lemma)
+        )
+
+        for row in cur:
+            entry = self._row_to_predicate(row)
+            candidates.append(entry)
+
+        # If we didn't find enough candidates, get all predicates and filter
+        if len(candidates) < limit * 2:
+            cur = self._conn.execute(
+                """
+                SELECT id, class_id, lemma, similarity_score, frequency, is_seed, embedding, created_at
+                FROM predicate_banks
+                ORDER BY frequency DESC
+                LIMIT 500
+                """
+            )
+            existing_lemmas = {c.lemma for c in candidates}
+            for row in cur:
+                entry = self._row_to_predicate(row)
+                if entry.lemma not in existing_lemmas:
+                    candidates.append(entry)
+                    existing_lemmas.add(entry.lemma)
+
+        # Score all candidates using SequenceMatcher
+        scored = []
+        for entry in candidates:
+            if entry.lemma == lemma:
+                continue  # Skip exact match
+            # SequenceMatcher ratio returns 0.0-1.0 similarity
+            sim = SequenceMatcher(None, lemma.lower(), entry.lemma.lower()).ratio()
+            if sim >= 0.3:  # Only include reasonably similar predicates
+                scored.append((sim, entry))
+
+        # Sort by similarity score descending
+        scored.sort(key=lambda x: -x[0])
+
+        # Yield top results
+        for sim, entry in scored[:limit]:
+            yield entry
 
     def increment_predicate_frequency(self, class_id: str, lemma: str) -> bool:
         """Increment the frequency counter for a predicate."""

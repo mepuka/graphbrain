@@ -337,7 +337,8 @@ class KeyValue(Hypergraph, ABC):
     def _edges_with_edges(self, edges, root):
         prefix = ' '.join([edge.to_str() for edge in edges])
         if root:
-            prefix = ''.join((prefix, ' ', root, '/'))
+            root_str = root.to_str() if hasattr(root, 'to_str') else str(root)
+            prefix = ''.join((prefix, ' ', root_str, '/'))
         for perm_str in self._permutations_with_prefix(prefix):
             edge = perm2edge(perm_str)
             if edge:

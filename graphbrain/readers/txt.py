@@ -1,6 +1,10 @@
+import logging
+
 import progressbar
 
 from graphbrain.readers.reader import Reader
+
+logger = logging.getLogger(__name__)
 
 
 class TxtReader(Reader):
@@ -21,9 +25,9 @@ class TxtReader(Reader):
 
         with progressbar.ProgressBar(max_value=len(paragraphs)) as bar:
             for i, paragraph in enumerate(paragraphs):
-                print(paragraph)
+                logger.debug('Processing paragraph: %s', paragraph[:100])
                 try:
                     self.parser.parse_and_add(paragraph, self.hg, sequence=self.sequence, infsrcs=self.infsrcs)
                 except RuntimeError as e:
-                    print(e)
+                    logger.warning('Error parsing paragraph: %s', e)
                 bar.update(i + 1)

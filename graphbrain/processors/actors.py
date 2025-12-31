@@ -1,6 +1,9 @@
+import logging
 from collections import Counter
 
 from graphbrain.utils.corefs import main_coref
+
+logger = logging.getLogger(__name__)
 from graphbrain.processor import Processor
 from graphbrain.utils.concepts import has_proper_concept, strip_concept
 from graphbrain.utils.lemmas import deep_lemma
@@ -49,13 +52,13 @@ class Actors(Processor):
                     subject = strip_concept(subjects[0])
                     if subject and has_proper_concept(subject):
                         pred = edge[0]
-                        dlemma = deep_lemma(self.hg, pred).root()
+                        dlemma = deep_lemma(self.hg, pred, same_if_none=True).root()
                         if dlemma in ACTOR_PRED_LEMMAS:
                             try:
                                 actor = main_coref(self.hg, subject)
                                 self.actor_counter[actor] += 1
                             except Exception as e:
-                                print(str(e))
+                                logger.warning('Error processing actor: %s', e)
 
     def on_end(self):
         for actor in self.actor_counter:
