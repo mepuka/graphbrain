@@ -97,9 +97,11 @@ discover patterns, and build domain-specific semantic models.
             logger.warning(f"Search backend initialization failed: {e}")
 
         # Store in context for tools to access
+        # Note: "backend" is an alias for "repo" used by learning tools
         yield {
             "hg": hg,
             "repo": repo,
+            "backend": repo,  # Alias for learning/metrics tools
             "searcher": searcher,
         }
 
@@ -121,6 +123,7 @@ discover patterns, and build domain-specific semantic models.
         from graphbrain.mcp.tools.feedback import register_feedback_tools
         from graphbrain.mcp.tools.agents import register_agent_tools
         from graphbrain.mcp.tools.algorithms import register_algorithm_tools
+        from graphbrain.mcp.tools.learning import register_learning_tools
 
         register_hypergraph_tools(self.server)
         register_classification_tools(self.server)
@@ -129,6 +132,7 @@ discover patterns, and build domain-specific semantic models.
         register_feedback_tools(self.server)
         register_agent_tools(self.server)
         register_algorithm_tools(self.server)
+        register_learning_tools(self.server)
 
     def run(self, transport: str = "stdio", **kwargs):
         """Run the MCP server.

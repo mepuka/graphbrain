@@ -25,13 +25,32 @@ from graphbrain.agents.config import (
 )
 from graphbrain.agents.memory.session import AgentSession, SessionManager
 from graphbrain.agents.memory.decisions import DecisionLog, DecisionLogger
+from graphbrain.agents.learning import (
+    ActiveLearningSampler,
+    SamplingStrategy,
+    SuggestionEngine,
+)
+from graphbrain.agents.metrics import (
+    QualityDashboard,
+    MetricsCollector,
+)
 
 __all__ = [
+    # Agent configuration
     "AgentType",
     "create_agent_options",
     "get_agent_definition",
+    # Session management
     "AgentSession",
     "SessionManager",
+    # Decision logging
     "DecisionLog",
     "DecisionLogger",
+    # Active learning
+    "ActiveLearningSampler",
+    "SamplingStrategy",
+    "SuggestionEngine",
+    # Quality metrics
+    "QualityDashboard",
+    "MetricsCollector",
 ]
