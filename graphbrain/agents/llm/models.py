@@ -6,7 +6,7 @@ must conform to, ensuring type-safe classification results.
 
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ─── Predicate Classification ───────────────────────────────────────────────
@@ -43,8 +43,7 @@ class PredicateClassification(BaseModel):
         description="Similar predicates in the same category"
     )
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class BatchPredicateResult(BaseModel):
@@ -88,8 +87,7 @@ class EntityClassification(BaseModel):
         description="More specific subtypes (e.g., 'politician', 'government')"
     )
 
-    class Config:
-        use_enum_values = True
+    model_config = ConfigDict(use_enum_values=True)
 
 
 class BatchEntityResult(BaseModel):
