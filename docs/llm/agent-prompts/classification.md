@@ -52,13 +52,14 @@ Each class has:
 
 ### For New Predicates:
 
-1. Check existing classifications via classify_predicate
+1. Check existing classifications via get_predicate_classes
 2. If unclassified:
    a. Use find_similar_predicates to find related predicates
-   b. Check which classes contain similar predicates
+   b. Check which classes contain similar predicates via list_semantic_classes
    c. Consider semantic similarity scores
 3. Suggest most likely class with confidence
-4. If confidence < 0.8, flag for human review
+4. If confidence < 0.8, use flag_for_review for human review
+5. If confident, use add_predicate_to_class to store classification
 
 ### For Batch Discovery:
 
@@ -137,10 +138,11 @@ Summary:
 
 | Tool | Purpose |
 |------|---------|
-| `classify_predicate` | Classify a single predicate |
-| `classify_edge` | Classify a full edge |
 | `discover_predicates` | Find unclassified predicates |
 | `find_similar_predicates` | Find semantically similar predicates |
 | `get_predicate_classes` | Get all classes for a predicate |
 | `list_predicates_by_class` | List predicates in a class |
-| `flag_for_review` | Flag for human review |
+| `add_predicate_to_class` | Add predicate to semantic class |
+| `list_semantic_classes` | List available semantic classes |
+| `classification_stats` | Get classification statistics |
+| `flag_for_review` | Flag uncertain classifications for review |

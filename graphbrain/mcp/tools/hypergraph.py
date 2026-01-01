@@ -102,10 +102,10 @@ Special pattern symbols:
 - {xy} : Require argument roles x and y
 - ... : Open-ended pattern (matches additional elements)
 
-Variable capture (use uppercase names):
-- *VAR : Capture any entity to VAR
-- .VAR : Capture any atom to VAR
-- (VAR) : Capture any edge to VAR
+Variable capture (use UPPERCASE names with type):
+- SPEAKER/Cp : Capture a proper noun to SPEAKER
+- MESSAGE/* : Capture anything to MESSAGE
+- PRED/Pd : Capture a declarative predicate to PRED
 
 Returns:
   - edges: list of {edge, bindings} where bindings maps VAR names to matched values
@@ -167,9 +167,9 @@ Parses the edge from SH (Semantic Hypergraph) notation and adds it
 to the database. Optionally associates source text.
 
 SH notation examples:
-- "(says/Pd john/Cp hello/C)" - John says hello
-- "(is/Av sky/Cp blue/Ca)" - The sky is blue
-- "(in/Br (capital/Cp paris/Cp) france/Cp)" - Paris is in France
+- "(says/Pd.sr john/Cp hello/C)" - John says hello
+- "(is/Pd.sc sky/Cc blue/Ca)" - The sky is blue
+- "(of/Br.ma capital/Cc france/Cp)" - Capital of France
 
 Args:
     edge: Edge in SH notation
@@ -275,7 +275,7 @@ Useful for finding all predicates of a certain type, all concepts
 in a relation, etc.
 
 Args:
-    root: The root atom (e.g., "says/Pd", "is/Av")
+    root: The root atom (e.g., "says/Pd", "is/Pd", "of/Br")
     limit: Maximum results (default 100)
 
 Returns:

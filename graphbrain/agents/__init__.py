@@ -34,6 +34,20 @@ from graphbrain.agents.metrics import (
     QualityDashboard,
     MetricsCollector,
 )
+from graphbrain.agents.llm import (
+    PredicateCategory,
+    PredicateClassification,
+    EntityType,
+    EntityClassification,
+    LLMProvider,
+    AnthropicProvider,
+)
+from graphbrain.agents.skills import (
+    BaseSkill,
+    SkillResult,
+    LLMClassificationSkill,
+    LLMEntityTypingSkill,
+)
 
 __all__ = [
     # Agent configuration
@@ -53,4 +67,17 @@ __all__ = [
     # Quality metrics
     "QualityDashboard",
     "MetricsCollector",
+    # LLM models
+    "PredicateCategory",
+    "PredicateClassification",
+    "EntityType",
+    "EntityClassification",
+    # LLM providers
+    "LLMProvider",
+    "AnthropicProvider",
+    # Skills
+    "BaseSkill",
+    "SkillResult",
+    "LLMClassificationSkill",
+    "LLMEntityTypingSkill",
 ]

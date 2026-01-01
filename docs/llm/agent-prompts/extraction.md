@@ -101,9 +101,9 @@ For each extraction, report:
 Input: "Seattle's mayor announced a new transit plan yesterday."
 
 Extraction:
-- Edge: (announced/Pd.sox (+/B/. seattle/Cp ('s/Bp mayor/Cc)) (a/Md (+/B/. new/Ma (+/B/. transit/Cc plan/Cc))) yesterday/T)
+- Edge: (announced/Pd.sox (+/B/. seattle/Cp ('s/Bp mayor/Cc)) (a/Md (+/B/. new/Ma (+/B/. transit/Cc plan/Cc))) yesterday/Tt)
 - Confidence: 0.85
-- Note: Compound structure with possessive, modifiers, and temporal marker
+- Note: Compound structure with possessive, modifiers, and temporal marker (Tt)
 ```
 
 ## MCP Tools
@@ -113,4 +113,4 @@ Extraction:
 | `add_edge` | Store extracted edges with attributes |
 | `get_edge` | Check if edge already exists |
 | `pattern_match` | Find similar existing edges |
-| `flag_for_review` | Mark uncertain extractions |
+| `flag_for_review` | Mark uncertain extractions for review |
