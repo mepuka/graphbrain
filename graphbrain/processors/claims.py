@@ -1,5 +1,6 @@
 import logging
 from collections import Counter
+from typing import Optional, Set
 
 import progressbar
 
@@ -12,6 +13,7 @@ from graphbrain.utils.concepts import has_proper_concept, strip_concept
 from graphbrain.utils.lemmas import deep_lemma
 
 
+# Fallback predicate set when semantic similarity is unavailable
 CLAIM_PRED_LEMMAS = {'say', 'claim'}
 
 
@@ -36,7 +38,22 @@ def replace_subject(edge, new_subject):
 
 
 class Claims(Processor):
-    def __init__(self, hg, sequence=None):
+    """Extract claims from hypergraph edges.
+
+    Uses PredicateAnalyzer for dynamic predicate discovery when available,
+    falling back to hardcoded CLAIM_PRED_LEMMAS otherwise.
+    """
+
+    def __init__(self, hg, sequence=None, use_adaptive: bool = True,
+                 similarity_threshold: float = 0.6):
+        """Initialize the Claims processor.
+
+        Args:
+            hg: Hypergraph instance
+            sequence: Optional sequence number
+            use_adaptive: If True, use PredicateAnalyzer for dynamic discovery
+            similarity_threshold: Threshold for semantic similarity matching
+        """
         super().__init__(hg=hg, sequence=sequence)
         self.actors = set()
         self.female = None
@@ -49,6 +66,47 @@ class Claims(Processor):
         self.non_human_counter = Counter()
         self.claims = []
         self.anaphoras = 0
+        self.use_adaptive = use_adaptive
+        self.similarity_threshold = similarity_threshold
+        self._claim_predicates: Optional[Set[str]] = None
+        self._analyzer = None
+        self._predicates_discovered = 0
+
+    @property
+    def claim_predicates(self) -> Set[str]:
+        """Get claim predicates, using adaptive discovery if available."""
+        if self._claim_predicates is not None:
+            return self._claim_predicates
+
+        if not self.use_adaptive:
+            self._claim_predicates = CLAIM_PRED_LEMMAS
+            return self._claim_predicates
+
+        try:
+            from graphbrain.processors.adaptive_predicates import PredicateAnalyzer
+
+            if self._analyzer is None:
+                self._analyzer = PredicateAnalyzer(self.hg)
+                self._analyzer.discover_predicates(min_frequency=2)
+
+            # Get claim predicates via semantic similarity
+            claim_preds = set(self._analyzer.get_predicates_by_category(
+                'claim', threshold=self.similarity_threshold))
+
+            # Always include the seed predicates
+            self._claim_predicates = claim_preds | CLAIM_PRED_LEMMAS
+            self._predicates_discovered = len(claim_preds - CLAIM_PRED_LEMMAS)
+
+            logger.info(
+                f"Claim extraction using {len(self._claim_predicates)} predicates "
+                f"({self._predicates_discovered} discovered via similarity)"
+            )
+
+        except Exception as e:
+            logger.warning(f"Adaptive predicate discovery failed: {e}, using fallback")
+            self._claim_predicates = CLAIM_PRED_LEMMAS
+
+        return self._claim_predicates
 
     def _gender(self, actor):
         counts = (('female', self.female_counter[actor]),
@@ -90,7 +148,7 @@ class Claims(Processor):
                         deep_lemma(
                             self.hg,
                             pred,
-                            same_if_none=True).root() in CLAIM_PRED_LEMMAS):
+                            same_if_none=True).root() in self.claim_predicates):
                     subjects = edge.edges_with_argrole('s')
                     claims = edge.edges_with_argrole('r')
                     if len(subjects) == 1 and len(claims) >= 1:
@@ -175,4 +233,7 @@ class Claims(Processor):
                   len(self.non_human))
         cs = tuple([str(x) for x in counts])
         rep_gen = 'female: {}; group: {}; male: {}; non-human: {}'.format(*cs)
-        return '; '.join((rep_claims, rep_anaph, rep_gen))
+        base = '; '.join((rep_claims, rep_anaph, rep_gen))
+        if self._predicates_discovered > 0:
+            return f'{base} (using {self._predicates_discovered} discovered predicates)'
+        return base
