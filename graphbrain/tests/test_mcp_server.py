@@ -61,7 +61,8 @@ class TestMCPToolRegistration:
             return len(tools)
 
         count = asyncio.run(count_tools())
-        assert count == 27  # Total number of tools
+        # 5 hypergraph + 4 classification + 7 semantic_class + 7 predicate + 5 feedback = 28 tools
+        assert count == 28
 
     def test_server_creation(self):
         """Test server module structure."""

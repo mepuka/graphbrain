@@ -17,6 +17,7 @@ from graphbrain.classification.models import (
     EdgeClassification,
     ClassificationFeedback,
 )
+from graphbrain.classification.backends.base import ClassificationBackend
 
 try:
     import psycopg2
@@ -142,11 +143,17 @@ END $$;
 """
 
 
-class ClassificationRepository:
+class ClassificationRepository(ClassificationBackend):
     """Repository for classification entities using PostgreSQL.
+
+    Inherits from ClassificationBackend to ensure interface compatibility.
 
     Provides CRUD operations for semantic classes, predicate banks,
     patterns, and classifications.
+
+    Note: This is the legacy PostgreSQL-specific implementation.
+    Prefer using get_classification_backend() for new code, which
+    supports both PostgreSQL and SQLite backends.
 
     Usage:
         from graphbrain.classification.repository import ClassificationRepository

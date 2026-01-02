@@ -98,11 +98,13 @@ discover patterns, and build domain-specific semantic models.
 
         # Store in context for tools to access
         # Note: "backend" is an alias for "repo" used by learning tools
+        # Note: "current_session" holds the active agent session (set via set_current_session tool)
         yield {
             "hg": hg,
             "repo": repo,
             "backend": repo,  # Alias for learning/metrics tools
             "searcher": searcher,
+            "current_session": None,  # Active session_id, set by set_current_session tool
         }
 
         # Cleanup
@@ -124,6 +126,7 @@ discover patterns, and build domain-specific semantic models.
         from graphbrain.mcp.tools.agents import register_agent_tools
         from graphbrain.mcp.tools.algorithms import register_algorithm_tools
         from graphbrain.mcp.tools.learning import register_learning_tools
+        from graphbrain.mcp.tools.batch import register_batch_tools
 
         register_hypergraph_tools(self.server)
         register_classification_tools(self.server)
@@ -133,6 +136,7 @@ discover patterns, and build domain-specific semantic models.
         register_agent_tools(self.server)
         register_algorithm_tools(self.server)
         register_learning_tools(self.server)
+        register_batch_tools(self.server)
 
     def run(self, transport: str = "stdio", **kwargs):
         """Run the MCP server.

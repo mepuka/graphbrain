@@ -14,6 +14,7 @@ from graphbrain.mcp.errors import (
     error_response,
     ErrorCode,
 )
+from graphbrain.classification.models import PredicateBankEntry
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,165 @@ Returns:
             "predicates": predicates,
             "total": len(predicates),
             "seed_count": seed_count,
+        }
+
+    @server.tool(
+        name="expand_class_semsim",
+        description="""
+Expand a semantic class using embedding-based similarity.
+
+Uses sentence-transformers (e5-base-v2) to find predicates that are
+semantically similar to the seed predicates of a class. This is more
+accurate than lexical similarity for finding related verbs.
+
+Args:
+    class_id: The class ID (or use name+domain)
+    name: Class name (requires domain)
+    domain: Domain (default "default")
+    candidates: List of candidate predicates to check (optional)
+    threshold: Similarity threshold 0.0-1.0 (default 0.82)
+    limit: Maximum results (default 20)
+    auto_add: If True, automatically add discovered predicates to class
+
+Returns:
+  - class_id, class_name: the class
+  - seed_predicates: the seed predicates used for comparison
+  - discovered: list of {lemma, score, closest_seed}
+  - total: number discovered
+  - added: number added (if auto_add=True)
+""",
+    )
+    async def expand_class_semsim(
+        class_id: Optional[str] = None,
+        name: Optional[str] = None,
+        domain: str = "default",
+        candidates: Optional[list] = None,
+        threshold: float = 0.82,
+        limit: int = 20,
+        auto_add: bool = False,
+    ) -> dict:
+        """Expand a class using semantic similarity."""
+        logger.debug(f"expand_class_semsim: class_id={class_id}, name={name}, threshold={threshold}")
+
+        ctx = server.get_context()
+        lifespan_data = ctx.request_context.lifespan_context
+        repo = lifespan_data["repo"]
+        hg = lifespan_data["hg"]
+
+        # Get the class
+        if class_id:
+            sem_class = repo.get_class(class_id)
+        elif name:
+            sem_class = repo.get_class_by_name(name, domain)
+        else:
+            logger.warning("expand_class_semsim: missing class_id or name")
+            return error_response(ErrorCode.MISSING_PARAMETER, "Must provide either class_id or name")
+
+        if not sem_class:
+            logger.debug("expand_class_semsim: class not found")
+            return not_found_error("semantic_class", class_id or name)
+
+        # Get seed predicates from the class
+        seeds = []
+        for entry in repo.get_predicates_by_class(sem_class.id):
+            if entry.is_seed:
+                seeds.append(entry.lemma)
+
+        if not seeds:
+            return error_response(ErrorCode.INVALID_REQUEST, f"Class '{sem_class.name}' has no seed predicates")
+
+        # Initialize semsim matcher
+        try:
+            from graphbrain.semsim import get_matcher, SemSimType
+            matcher = get_matcher(SemSimType.FIX)
+        except Exception as e:
+            logger.error(f"expand_class_semsim: failed to initialize semsim - {e}")
+            return service_unavailable_error("semsim", str(e))
+
+        # Verify matcher has _similarities method (sentence-transformers or compatible)
+        if not hasattr(matcher, '_similarities'):
+            logger.error("expand_class_semsim: matcher does not support _similarities method")
+            return service_unavailable_error(
+                "semsim",
+                "expand_class_semsim requires a matcher with _similarities support. "
+                "Install sentence-transformers: pip install sentence-transformers"
+            )
+
+        # Get candidates - either provided or discover from graph
+        if candidates is None:
+            # Discover predicates from the graph
+            predicate_counts = {}
+            for edge in hg.all():
+                if not edge.atom and len(edge) > 0:
+                    connector = edge[0]
+                    if connector.atom:
+                        atom_type = connector.type()
+                        if atom_type and atom_type.startswith('P'):
+                            lemma = connector.root()
+                            predicate_counts[lemma] = predicate_counts.get(lemma, 0) + 1
+
+            # Filter to frequent predicates not already in class
+            existing = {e.lemma for e in repo.get_predicates_by_class(sem_class.id)}
+            candidates = [
+                lemma for lemma, count in predicate_counts.items()
+                if count >= 5 and lemma not in existing and lemma not in seeds
+            ]
+
+        if not candidates:
+            return {
+                "status": "success",
+                "class_id": sem_class.id,
+                "class_name": sem_class.name,
+                "seed_predicates": seeds,
+                "discovered": [],
+                "total": 0,
+                "added": 0,
+                "message": "No new candidates found",
+            }
+
+        # Find similar predicates using matcher's _similarities method
+        # This properly handles embedding prefixes, normalization, and caching
+        discovered = []
+        for cand in candidates:
+            sims = matcher._similarities(cand_word=cand, ref_words=seeds)
+            if sims:
+                max_sim = max(sims.values())
+                if max_sim >= threshold:
+                    best_seed = max(sims.items(), key=lambda x: x[1])[0]
+                    discovered.append({
+                        "lemma": cand,
+                        "score": round(max_sim, 3),
+                        "closest_seed": best_seed,
+                    })
+
+        # Sort by score descending
+        discovered = sorted(discovered, key=lambda x: -x["score"])[:limit]
+
+        # Auto-add if requested
+        added = 0
+        if auto_add:
+            for item in discovered:
+                try:
+                    entry = PredicateBankEntry(
+                        class_id=sem_class.id,
+                        lemma=item["lemma"],
+                        is_seed=False,
+                        similarity_score=item["score"],
+                    )
+                    repo.save_predicate(entry)
+                    added += 1
+                except Exception as e:
+                    logger.warning(f"expand_class_semsim: failed to add '{item['lemma']}' - {e}")
+
+        logger.info(f"expand_class_semsim: found {len(discovered)} similar predicates for '{sem_class.name}', added {added}")
+        return {
+            "status": "success",
+            "class_id": sem_class.id,
+            "class_name": sem_class.name,
+            "seed_predicates": seeds,
+            "discovered": discovered,
+            "total": len(discovered),
+            "added": added,
         }
 
     @server.tool(

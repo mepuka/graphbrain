@@ -10,7 +10,12 @@ from typing import Optional, Literal
 from mcp.server.fastmcp import FastMCP
 
 import graphbrain.hyperedge as he
-from graphbrain.mcp.errors import invalid_edge_error
+from graphbrain.mcp.errors import (
+    invalid_edge_error,
+    invalid_input_error,
+    service_unavailable_error,
+)
+from graphbrain.mcp.utils import validate_positive_int, validate_limit
 
 
 logger = logging.getLogger(__name__)
@@ -51,6 +56,10 @@ Returns:
         store: bool = False,
     ) -> dict:
         """Compute centrality scores."""
+        # Validate inputs
+        if error := validate_positive_int(top_k, "top_k"):
+            return error
+
         logger.debug(f"compute_centrality: algorithm={algorithm}, top_k={top_k}")
 
         from graphbrain.algorithms import (
@@ -77,11 +86,7 @@ Returns:
             elif algorithm == "eigenvector":
                 scores = eigenvector_centrality(hg, store=store)
             else:
-                return {
-                    "status": "error",
-                    "code": "invalid_algorithm",
-                    "message": f"Unknown algorithm: {algorithm}",
-                }
+                return invalid_input_error(f"Unknown centrality algorithm: {algorithm}")
 
             # Sort by score descending and take top_k
             sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -99,11 +104,7 @@ Returns:
             }
         except Exception as e:
             logger.error(f"compute_centrality: error - {e}")
-            return {
-                "status": "error",
-                "code": "algorithm_error",
-                "message": str(e),
-            }
+            return service_unavailable_error("centrality_algorithm", str(e))
 
     @server.tool(
         name="find_communities",
@@ -136,6 +137,12 @@ Returns:
         resolution: float = 1.0,
     ) -> dict:
         """Detect communities."""
+        # Validate inputs
+        if error := validate_positive_int(min_size, "min_size", allow_zero=False):
+            return error
+        if resolution <= 0:
+            return invalid_input_error("resolution must be positive", {"resolution": resolution})
+
         logger.debug(f"find_communities: algorithm={algorithm}, min_size={min_size}")
 
         from graphbrain.algorithms import (
@@ -159,11 +166,7 @@ Returns:
             elif algorithm == "connected_components":
                 communities = connected_components(hg)
             else:
-                return {
-                    "status": "error",
-                    "code": "invalid_algorithm",
-                    "message": f"Unknown algorithm: {algorithm}",
-                }
+                return invalid_input_error(f"Unknown community algorithm: {algorithm}")
 
             # Filter by min_size and format
             results = []
@@ -187,11 +190,7 @@ Returns:
             }
         except Exception as e:
             logger.error(f"find_communities: error - {e}")
-            return {
-                "status": "error",
-                "code": "algorithm_error",
-                "message": str(e),
-            }
+            return service_unavailable_error("community_algorithm", str(e))
 
     @server.tool(
         name="find_path",
@@ -218,6 +217,10 @@ Returns:
         max_depth: int = 10,
     ) -> dict:
         """Find shortest path between atoms."""
+        # Validate inputs
+        if error := validate_positive_int(max_depth, "max_depth"):
+            return error
+
         logger.debug(f"find_path: source='{source}', target='{target}'")
 
         from graphbrain.algorithms import shortest_path, has_path
@@ -261,11 +264,7 @@ Returns:
                 }
         except Exception as e:
             logger.error(f"find_path: error - {e}")
-            return {
-                "status": "error",
-                "code": "algorithm_error",
-                "message": str(e),
-            }
+            return service_unavailable_error("path_algorithm", str(e))
 
     @server.tool(
         name="get_graph_stats",
@@ -317,11 +316,7 @@ Returns:
             return result
         except Exception as e:
             logger.error(f"get_graph_stats: error - {e}")
-            return {
-                "status": "error",
-                "code": "algorithm_error",
-                "message": str(e),
-            }
+            return service_unavailable_error("graph_stats", str(e))
 
     @server.tool(
         name="extract_subgraph",
@@ -347,6 +342,10 @@ Returns:
         include_edges: bool = False,
     ) -> dict:
         """Extract ego subgraph around center atom."""
+        # Validate inputs
+        if error := validate_positive_int(radius, "radius"):
+            return error
+
         logger.debug(f"extract_subgraph: center='{center}', radius={radius}")
 
         from graphbrain.algorithms import ego_atoms, ego_graph
@@ -379,11 +378,7 @@ Returns:
             return result
         except Exception as e:
             logger.error(f"extract_subgraph: error - {e}")
-            return {
-                "status": "error",
-                "code": "algorithm_error",
-                "message": str(e),
-            }
+            return service_unavailable_error("subgraph_extraction", str(e))
 
     @server.tool(
         name="find_neighbors",
@@ -406,6 +401,10 @@ Returns:
         limit: int = 100,
     ) -> dict:
         """Find neighboring atoms."""
+        # Validate inputs
+        if error := validate_limit(limit, max_limit=10000):
+            return error
+
         logger.debug(f"find_neighbors: atom='{atom}', limit={limit}")
 
         from graphbrain.algorithms import neighbors
@@ -431,11 +430,7 @@ Returns:
             }
         except Exception as e:
             logger.error(f"find_neighbors: error - {e}")
-            return {
-                "status": "error",
-                "code": "algorithm_error",
-                "message": str(e),
-            }
+            return service_unavailable_error("neighbor_search", str(e))
 
     @server.tool(
         name="find_reachable",
@@ -483,8 +478,4 @@ Returns:
             }
         except Exception as e:
             logger.error(f"find_reachable: error - {e}")
-            return {
-                "status": "error",
-                "code": "algorithm_error",
-                "message": str(e),
-            }
+            return service_unavailable_error("reachability_search", str(e))

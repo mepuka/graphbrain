@@ -6,6 +6,7 @@ Provides abstract base class and implementations for PostgreSQL and SQLite.
 import logging
 from typing import Optional
 
+from graphbrain.classification.backends import BackendType, detect_backend_type
 from graphbrain.classification.search.base import SearchBackend, SearchResult
 
 logger = logging.getLogger(__name__)
@@ -18,9 +19,7 @@ def get_search_backend(
 ) -> SearchBackend:
     """Factory function to create appropriate search backend.
 
-    Detects backend type from connection string:
-    - postgresql:// or postgres:// -> PostgresSearchBackend
-    - File path with .db, .sqlite, .sqlite3 -> SqliteSearchBackend
+    Uses detect_backend_type() for consistent backend detection.
 
     Args:
         connection_string: Database connection string or file path
@@ -34,8 +33,9 @@ def get_search_backend(
         ValueError: If backend type cannot be determined
         ImportError: If required dependencies are not available
     """
-    # Check for PostgreSQL
-    if connection_string.startswith(('postgresql://', 'postgres://')):
+    backend_type = detect_backend_type(connection_string)
+
+    if backend_type == BackendType.POSTGRES:
         from graphbrain.classification.search.postgres import PostgresSearchBackend
         logger.info("Using PostgreSQL search backend")
         return PostgresSearchBackend(
@@ -44,21 +44,9 @@ def get_search_backend(
             default_weights=default_weights,
         )
 
-    # Check for SQLite file extensions
-    sqlite_extensions = ('.db', '.sqlite', '.sqlite3')
-    if any(connection_string.endswith(ext) for ext in sqlite_extensions):
+    if backend_type == BackendType.SQLITE:
         from graphbrain.classification.search.sqlite import SqliteSearchBackend
         logger.info(f"Using SQLite search backend: {connection_string}")
-        return SqliteSearchBackend(
-            connection_string,
-            embedding_model=embedding_model,
-            default_weights=default_weights,
-        )
-
-    # Try to detect based on path-like structure
-    if '/' in connection_string or '\\' in connection_string:
-        from graphbrain.classification.search.sqlite import SqliteSearchBackend
-        logger.info(f"Using SQLite search backend (path detected): {connection_string}")
         return SqliteSearchBackend(
             connection_string,
             embedding_model=embedding_model,

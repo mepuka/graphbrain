@@ -106,6 +106,127 @@ def register_agent_tools(server: FastMCP):
             logger.error(f"Failed to create session: {e}")
             return database_error("create_agent_session", e)
 
+    @server.tool(name="set_current_session")
+    async def set_current_session(session_id: str) -> dict:
+        """
+        Set the current active session for automatic context injection.
+
+        Once set, subsequent tool calls can access the current session
+        without explicitly passing session_id. This enables automatic
+        decision logging and session state tracking.
+
+        Args:
+            session_id: The session ID to make active
+
+        Returns:
+            Confirmation with session details
+        """
+        logger.info(f"Setting current session: {session_id}")
+
+        try:
+            from graphbrain.agents.memory.session import SessionManager
+
+            conn = _get_connection()
+            manager = SessionManager(conn)
+
+            session = manager.get(session_id)
+            if not session:
+                return not_found_error("session", session_id)
+
+            # Store in lifespan context
+            ctx = server.get_context()
+            lifespan_data = ctx.request_context.lifespan_context
+            lifespan_data["current_session"] = session_id
+
+            logger.info(f"Current session set to: {session_id}")
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "agent_type": session.agent_type.value,
+                "domain": session.domain,
+                "message": "Session is now active. Subsequent calls will use this session automatically.",
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to set current session: {e}")
+            return database_error("set_current_session", e)
+
+    @server.tool(name="get_current_session")
+    async def get_current_session() -> dict:
+        """
+        Get the currently active session.
+
+        Returns the session_id that was set via set_current_session,
+        or indicates if no session is currently active.
+
+        Returns:
+            Current session information or indication that none is set
+        """
+        ctx = server.get_context()
+        lifespan_data = ctx.request_context.lifespan_context
+        current_session = lifespan_data.get("current_session")
+
+        if not current_session:
+            return {
+                "status": "success",
+                "session_id": None,
+                "active": False,
+                "message": "No session currently active. Use set_current_session to activate one.",
+            }
+
+        try:
+            from graphbrain.agents.memory.session import SessionManager
+
+            conn = _get_connection()
+            manager = SessionManager(conn)
+
+            session = manager.get(current_session)
+            if not session:
+                # Session was deleted, clear the reference
+                lifespan_data["current_session"] = None
+                return {
+                    "status": "success",
+                    "session_id": None,
+                    "active": False,
+                    "message": "Previously active session no longer exists.",
+                }
+
+            return {
+                "status": "success",
+                "session_id": current_session,
+                "active": True,
+                "agent_type": session.agent_type.value,
+                "domain": session.domain,
+                "edges_added": session.edges_added,
+                "classifications_made": session.classifications_made,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to get current session: {e}")
+            return database_error("get_current_session", e)
+
+    @server.tool(name="clear_current_session")
+    async def clear_current_session() -> dict:
+        """
+        Clear the currently active session.
+
+        After clearing, tools will no longer have automatic session context.
+
+        Returns:
+            Confirmation of session cleared
+        """
+        ctx = server.get_context()
+        lifespan_data = ctx.request_context.lifespan_context
+        previous_session = lifespan_data.get("current_session")
+        lifespan_data["current_session"] = None
+
+        logger.info(f"Cleared current session (was: {previous_session})")
+        return {
+            "status": "success",
+            "previous_session": previous_session,
+            "message": "Session context cleared.",
+        }
+
     @server.tool(name="get_session_state")
     async def get_session_state(session_id: str) -> dict:
         """
@@ -141,7 +262,7 @@ def register_agent_tools(server: FastMCP):
 
     @server.tool(name="update_session_state")
     async def update_session_state(
-        session_id: str,
+        session_id: Optional[str] = None,
         edges_added: Optional[int] = None,
         classifications_made: Optional[int] = None,
         recent_edge: Optional[str] = None,
@@ -151,7 +272,7 @@ def register_agent_tools(server: FastMCP):
         Update session state with new activity.
 
         Args:
-            session_id: The session to update
+            session_id: The session to update (optional, uses current session if not provided)
             edges_added: Increment edges_added counter
             classifications_made: Increment classifications counter
             recent_edge: Add edge to recent edges list
@@ -160,6 +281,17 @@ def register_agent_tools(server: FastMCP):
         Returns:
             Updated session state
         """
+        # Use current session if session_id not provided
+        if session_id is None:
+            ctx = server.get_context()
+            lifespan_data = ctx.request_context.lifespan_context
+            session_id = lifespan_data.get("current_session")
+            if not session_id:
+                return error_response(
+                    ErrorCode.MISSING_PARAMETER,
+                    "No session_id provided and no current session active."
+                )
+
         logger.info(f"Updating session state: {session_id}")
 
         try:
@@ -201,10 +333,10 @@ def register_agent_tools(server: FastMCP):
 
     @server.tool(name="log_decision")
     async def log_decision(
-        session_id: str,
         decision_type: str,
         input_data: dict,
         output_data: dict,
+        session_id: Optional[str] = None,
         confidence: float = 1.0,
         method: str = "",
         reasoning: str = "",
@@ -213,10 +345,10 @@ def register_agent_tools(server: FastMCP):
         Log an agent decision for audit trail.
 
         Args:
-            session_id: The session making the decision
             decision_type: Type of decision (add_edge, classify_predicate, etc.)
             input_data: Input to the decision
             output_data: Output/result of the decision
+            session_id: The session making the decision (optional, uses current session if not provided)
             confidence: Confidence score
             method: Method used for the decision
             reasoning: Human-readable reasoning
@@ -224,6 +356,18 @@ def register_agent_tools(server: FastMCP):
         Returns:
             Decision log details
         """
+        # Use current session if session_id not provided
+        if session_id is None:
+            ctx = server.get_context()
+            lifespan_data = ctx.request_context.lifespan_context
+            session_id = lifespan_data.get("current_session")
+            if not session_id:
+                return error_response(
+                    ErrorCode.MISSING_PARAMETER,
+                    "No session_id provided and no current session active. "
+                    "Either provide session_id or call set_current_session first."
+                )
+
         logger.info(f"Logging decision: session={session_id}, type={decision_type}")
 
         valid_types = [
@@ -446,4 +590,67 @@ def register_agent_tools(server: FastMCP):
             logger.error(f"Failed to list sessions: {e}")
             return database_error("list_sessions", e)
 
-    logger.info("Registered 8 agent management tools")
+    @server.tool(name="get_cached_classification")
+    async def get_cached_classification(
+        predicate: str,
+        session_id: Optional[str] = None,
+    ) -> dict:
+        """
+        Look up a predicate in the session's classification cache.
+
+        The cache stores classifications made during the session to avoid
+        redundant lookups. This is useful for checking if a predicate
+        was already classified before making another API call.
+
+        Args:
+            predicate: The predicate lemma to look up
+            session_id: Session to check (optional, uses current session if not provided)
+
+        Returns:
+            Classification info if cached, or cache miss indication
+        """
+        # Use current session if session_id not provided
+        if session_id is None:
+            ctx = server.get_context()
+            lifespan_data = ctx.request_context.lifespan_context
+            session_id = lifespan_data.get("current_session")
+            if not session_id:
+                return error_response(
+                    ErrorCode.MISSING_PARAMETER,
+                    "No session_id provided and no current session active."
+                )
+
+        try:
+            from graphbrain.agents.memory.session import SessionManager
+
+            conn = _get_connection()
+            manager = SessionManager(conn)
+
+            session = manager.get(session_id)
+            if not session:
+                return not_found_error("session", session_id)
+
+            cached_class = session.classification_cache.get(predicate)
+
+            if cached_class:
+                return {
+                    "status": "success",
+                    "cache_hit": True,
+                    "predicate": predicate,
+                    "class_id": cached_class,
+                    "session_id": session_id,
+                }
+            else:
+                return {
+                    "status": "success",
+                    "cache_hit": False,
+                    "predicate": predicate,
+                    "session_id": session_id,
+                    "message": "Predicate not in session cache",
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to get cached classification: {e}")
+            return database_error("get_cached_classification", e)
+
+    logger.info("Registered 9 agent management tools")

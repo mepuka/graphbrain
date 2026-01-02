@@ -12,6 +12,7 @@ from graphbrain.mcp.errors import (
     invalid_edge_error,
     service_unavailable_error,
 )
+from graphbrain.mcp.utils import validate_threshold, validate_limit, calculate_confidence
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,10 @@ Returns:
         threshold: float = 0.5,
     ) -> dict:
         """Classify a predicate lemma."""
+        # Validate inputs
+        if error := validate_threshold(threshold):
+            return error
+
         logger.debug(f"classify_predicate: predicate='{predicate}', threshold={threshold}")
 
         ctx = server.get_context()
@@ -54,13 +59,8 @@ Returns:
 
         # Find predicate in predicate banks
         for entry, sem_class in repo.find_predicate(predicate):
-            # Handle confidence: use similarity_score if set, otherwise default based on is_seed
-            if entry.similarity_score is not None:
-                confidence = entry.similarity_score
-            elif entry.is_seed:
-                confidence = 1.0
-            else:
-                confidence = 0.7
+            # Calculate confidence using centralized helper
+            confidence = calculate_confidence(entry)
             classifications.append({
                 "class_name": sem_class.name,
                 "class_id": sem_class.id,
@@ -86,6 +86,48 @@ Returns:
             "threshold": threshold,
         }
 
+    def _extract_predicates(edge):
+        """Extract all predicate lemmas from an edge, including nested ones.
+
+        Traverses the edge structure recursively to find all predicates.
+        A predicate is identified by its type starting with 'P' (predicate)
+        or being the connector of a relation.
+
+        Returns list of (lemma, subedge_str, depth) tuples.
+        """
+        predicates = []
+
+        def traverse(e, depth=0):
+            if e.atom:
+                # Check if this atom is a predicate type
+                try:
+                    t = e.type()
+                    if t and t[0] == 'P':
+                        predicates.append((e.root(), str(e), depth))
+                except Exception as ex:
+                    logger.debug(f"_extract_predicates: failed to get type for atom {e}: {ex}")
+                return
+
+            # Non-atomic edge - check connector
+            if len(e) > 0:
+                connector = e[0]
+                # Get the inner connector atom
+                try:
+                    conn_atom = e.connector_atom()
+                    if conn_atom:
+                        t = conn_atom.type()
+                        if t and t[0] == 'P':
+                            predicates.append((conn_atom.root(), str(e), depth))
+                except Exception as ex:
+                    logger.debug(f"_extract_predicates: failed to get connector for edge {e}: {ex}")
+
+                # Recursively traverse all elements
+                for item in e:
+                    traverse(item, depth + 1)
+
+        traverse(edge)
+        return predicates
+
     @server.tool(
         name="classify_edge",
         description="""
@@ -93,24 +135,33 @@ Classify an edge into semantic classes.
 
 Analyzes the edge structure and predicate to determine semantic classes.
 Uses both predicate classification and structural pattern matching.
+Performs DEEP TRAVERSAL to find predicates nested within conjunctions
+and other complex structures.
 
 Args:
     edge: Edge in SH notation
     threshold: Minimum confidence threshold (default 0.5)
+    deep: If True, traverse nested structures to find all predicates (default True)
 
 Returns:
   - edge: the input edge
   - classifications: list of {class_name, class_id, confidence, method}
-  - methods: list of methods used (predicate, pattern)
+  - methods: list of methods used (predicate, pattern, deep_predicate)
   - needs_review: true if low confidence or no match found
+  - predicates_found: list of predicates discovered in the edge
 """,
     )
     async def classify_edge(
         edge: str,
         threshold: float = 0.5,
+        deep: bool = True,
     ) -> dict:
         """Classify an edge."""
-        logger.debug(f"classify_edge: edge='{edge}', threshold={threshold}")
+        # Validate inputs
+        if error := validate_threshold(threshold):
+            return error
+
+        logger.debug(f"classify_edge: edge='{edge}', threshold={threshold}, deep={deep}")
 
         import graphbrain.hyperedge as he
 
@@ -126,31 +177,50 @@ Returns:
 
         classifications = []
         methods_used = []
+        predicates_found = []
+        seen_classes = set()  # Avoid duplicate classifications
 
-        # Get the main predicate if it's a relation
+        def classify_predicate_lemma(lemma, method_name, source=None):
+            """Helper to classify a predicate lemma and add to classifications."""
+            for entry, sem_class in repo.find_predicate(lemma):
+                # Skip if we've already classified this class
+                class_key = (sem_class.id, method_name)
+                if class_key in seen_classes:
+                    continue
+                seen_classes.add(class_key)
+
+                # Calculate confidence using centralized helper
+                confidence = calculate_confidence(entry)
+
+                classification = {
+                    "class_name": sem_class.name,
+                    "class_id": sem_class.id,
+                    "confidence": confidence,
+                    "method": method_name,
+                }
+                if source:
+                    classification["source_predicate"] = source
+                classifications.append(classification)
+
+                if method_name not in methods_used:
+                    methods_used.append(method_name)
+
+        # Get the main predicate if it's a relation (shallow check)
         if not parsed_edge.atom and len(parsed_edge) > 0:
             connector = parsed_edge[0]
             if connector.atom:
-                # Get lemma from the connector
                 lemma = connector.root()
+                predicates_found.append({"lemma": lemma, "depth": 0, "source": str(connector)})
+                classify_predicate_lemma(lemma, "predicate")
 
-                # Classify the predicate
-                for entry, sem_class in repo.find_predicate(lemma):
-                    # Handle confidence: use similarity_score if set, otherwise default based on is_seed
-                    if entry.similarity_score is not None:
-                        confidence = entry.similarity_score
-                    elif entry.is_seed:
-                        confidence = 1.0
-                    else:
-                        confidence = 0.7
-                    classifications.append({
-                        "class_name": sem_class.name,
-                        "class_id": sem_class.id,
-                        "confidence": confidence,
-                        "method": "predicate",
-                    })
-                    if "predicate" not in methods_used:
-                        methods_used.append("predicate")
+        # Deep traversal to find nested predicates
+        if deep:
+            nested_predicates = _extract_predicates(parsed_edge)
+            for lemma, source, depth in nested_predicates:
+                # Skip depth 0 - already handled above
+                if depth > 0:
+                    predicates_found.append({"lemma": lemma, "depth": depth, "source": source})
+                    classify_predicate_lemma(lemma, "deep_predicate", source)
 
         # Check structural patterns
         from graphbrain.patterns import match_pattern
@@ -165,15 +235,18 @@ Returns:
                         # Pattern matched - get the class
                         sem_class = repo.get_class(class_id)
                         if sem_class:
-                            classifications.append({
-                                "class_name": sem_class.name,
-                                "class_id": sem_class.id,
-                                "confidence": 0.8,  # Pattern match confidence
-                                "method": "pattern",
-                                "pattern": pattern_obj.pattern,
-                            })
-                            if "pattern" not in methods_used:
-                                methods_used.append("pattern")
+                            class_key = (sem_class.id, "pattern")
+                            if class_key not in seen_classes:
+                                seen_classes.add(class_key)
+                                classifications.append({
+                                    "class_name": sem_class.name,
+                                    "class_id": sem_class.id,
+                                    "confidence": 0.8,  # Pattern match confidence
+                                    "method": "pattern",
+                                    "pattern": pattern_obj.pattern,
+                                })
+                                if "pattern" not in methods_used:
+                                    methods_used.append("pattern")
                 except Exception as e:
                     logger.debug(f"Pattern match error: {e}")
 
@@ -186,6 +259,7 @@ Returns:
             "classifications": classifications,
             "methods": methods_used,
             "needs_review": needs_review,
+            "predicates_found": predicates_found,
         }
 
     @server.tool(
@@ -219,6 +293,14 @@ Returns:
         limit: int = 50,
     ) -> dict:
         """Hybrid BM25 + semantic search."""
+        # Validate inputs
+        if error := validate_limit(limit, max_limit=1000):
+            return error
+        if error := validate_threshold(bm25_weight, "bm25_weight"):
+            return error
+        if error := validate_threshold(semantic_weight, "semantic_weight"):
+            return error
+
         logger.debug(f"hybrid_search: query='{query}', class_id={class_id}, limit={limit}")
 
         ctx = server.get_context()
@@ -282,6 +364,10 @@ Returns:
         limit: int = 100,
     ) -> dict:
         """BM25-only search."""
+        # Validate inputs
+        if error := validate_limit(limit, max_limit=1000):
+            return error
+
         logger.debug(f"bm25_search: query='{query}', limit={limit}")
 
         ctx = server.get_context()

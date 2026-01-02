@@ -14,6 +14,7 @@ from graphbrain.mcp.errors import (
     invalid_pattern_error,
     database_error,
 )
+from graphbrain.mcp.utils import validate_limit
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,10 @@ Returns:
         limit: int = 50,
     ) -> dict:
         """Search edges by text content."""
+        # Validate inputs
+        if error := validate_limit(limit, max_limit=1000):
+            return error
+
         logger.debug(f"search_edges: query='{query}', limit={limit}")
 
         ctx = server.get_context()
@@ -118,6 +123,10 @@ Returns:
         limit: int = 100,
     ) -> dict:
         """Match edges against a structural pattern."""
+        # Validate inputs
+        if error := validate_limit(limit, max_limit=10000):
+            return error
+
         logger.debug(f"pattern_match: pattern='{pattern}', limit={limit}")
 
         from graphbrain.patterns import match_pattern
@@ -289,6 +298,10 @@ Returns:
         limit: int = 100,
     ) -> dict:
         """Find edges with a specific root."""
+        # Validate inputs
+        if error := validate_limit(limit, max_limit=10000):
+            return error
+
         logger.debug(f"edges_with_root: root='{root}', limit={limit}")
 
         ctx = server.get_context()
