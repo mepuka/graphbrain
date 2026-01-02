@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "graphbrain": {
+      "command": "/Users/pooks/Dev/graphbrain/.venv/bin/python",
+      "args": ["/Users/pooks/Dev/graphbrain/scripts/run_mcp_server.py"],
+      "env": {
+        "GRAPHBRAIN_DB": "/Users/pooks/Dev/graphbrain/urbanist.db"
+      }
+    }
+  }
+}
