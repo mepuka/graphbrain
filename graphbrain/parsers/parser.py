@@ -1,16 +1,17 @@
 import logging
 import re
+from typing import Any, Optional
 
 import graphbrain.constants as const
 
 from graphbrain import hedge
-from graphbrain.hyperedge import UniqueAtom
+from graphbrain.hyperedge import Hyperedge, UniqueAtom
 
 
 logger = logging.getLogger(__name__)
 
 
-def _contains_resolution(edge):
+def _contains_resolution(edge: Hyperedge) -> bool:
     if edge.atom:
         return False
     if str(edge[0]) == const.resolved_to_connector:
@@ -20,45 +21,51 @@ def _contains_resolution(edge):
 
 class Parser(object):
     """Defines the common interface for parser objects.
-    Parsers transofrm natural text into graphbrain hyperedges.
+
+    Parsers transform natural text into graphbrain hyperedges.
     """
 
-    def __init__(self, lemmas=True, corefs=True, debug=False):
+    def __init__(
+        self,
+        lemmas: bool = True,
+        corefs: bool = True,
+        debug: bool = False,
+    ) -> None:
+        """Initialize parser.
+
+        Args:
+            lemmas: Whether to add lemma edges.
+            corefs: Whether to resolve coreferences.
+            debug: Enable debug logging.
+        """
         self.lemmas = lemmas
         self.corefs = corefs
         self.debug = debug
 
         # to be created by derived classes
-        self.lang = None
+        self.lang: Optional[str] = None
 
-    def debug_msg(self, msg):
+    def debug_msg(self, msg: str) -> None:
         if self.debug:
             logger.debug(msg)
 
-    def parse(self, text):
-        """Transforms the given text into hyperedges + aditional information.
-        Returns a dictionary with two fields:
+    def parse(self, text: str) -> dict[str, Any]:
+        """Transform text into hyperedges + additional information.
 
-        -> parses: a sequence of dictionaries, with one dictionary for each
-        sentence found in the text.
+        Args:
+            text: Natural language text to parse.
 
-        -> inferred_edges: a sequence of edges inferred during by parsing
-        process (e.g. genders, 'X is Y' relationships)
+        Returns:
+            Dictionary with fields:
+            - parses: list of dicts, one per sentence
+            - inferred_edges: edges inferred during parsing
 
-        Each sentence parse dictionary contains at least the following fields:
-
-        -> main_edge: the hyperedge corresponding to the sentence.
-
-        -> extra_edges: aditional edges, e.g. connecting atoms that appear
-        in the main_edge to their lemmas.
-
-        -> text: the string of natural language text corresponding to the
-        main_edge, i.e.: the sentence itself.
-
-        -> edges_text: a dictionary of all edges and subedges to their
-        corresponding text.
-
-        -> corefs: resolve coreferences.
+            Each sentence parse dict contains:
+            - main_edge: the hyperedge for the sentence
+            - extra_edges: additional edges (lemmas, etc.)
+            - text: the original sentence text
+            - edges_text: mapping of edges to their text
+            - resolved_corefs: edge with resolved coreferences
         """
         # replace newlines with spaces
         clean_text = text.replace('\n', ' ').replace('\r', ' ')
@@ -130,7 +137,14 @@ class Parser(object):
             for subedge, reference_subedge in zip(edge, _reference_edge):
                 self._set_edge_text(subedge, reference_subedge, hg, parse)
 
-    def parse_and_add(self, text, hg, sequence=None, infsrcs=False, max_text=None):
+    def parse_and_add(
+        self,
+        text: str,
+        hg,
+        sequence: Optional[str] = None,
+        infsrcs: bool = False,
+        max_text: Optional[int] = None,
+    ) -> dict[str, Any]:
         """Parse text and add results to hypergraph.
 
         Args:
@@ -140,6 +154,9 @@ class Parser(object):
             infsrcs: Whether to add inference source edges.
             max_text: Maximum text length for coreference. None uses config default,
                      0 means no limit, -1 disables chunking.
+
+        Returns:
+            Parse results dictionary.
         """
         from graphbrain.parsers.config import get_config
 
@@ -268,34 +285,44 @@ class Parser(object):
 
         return chunks
 
-    def sentences(self, text):
+    def sentences(self, text: str) -> list[str]:
+        """Split text into sentences. Override in subclasses."""
         raise NotImplementedError()
 
-    def atom_gender(self, atom):
+    def atom_gender(self, atom: Hyperedge) -> Optional[str]:
+        """Get gender of atom. Override in subclasses."""
         raise NotImplementedError()
 
-    def atom_number(self, atom):
+    def atom_number(self, atom: Hyperedge) -> Optional[str]:
+        """Get number (singular/plural) of atom. Override in subclasses."""
         raise NotImplementedError()
 
-    def atom_person(self, atom):
+    def atom_person(self, atom: Hyperedge) -> Optional[str]:
+        """Get person (1st/2nd/3rd) of atom. Override in subclasses."""
         raise NotImplementedError()
 
-    def atom_animacy(self, atom):
+    def atom_animacy(self, atom: Hyperedge) -> Optional[str]:
+        """Get animacy of atom. Override in subclasses."""
         raise NotImplementedError()
 
-    def _parse_token(self, token, atom_type):
+    def _parse_token(self, token: Any, atom_type: str) -> Hyperedge:
+        """Parse a single token into a hyperedge. Override in subclasses."""
         raise NotImplementedError()
 
-    def _parse(self, text):
+    def _parse(self, text: str) -> dict[str, Any]:
+        """Internal parse method. Override in subclasses."""
         raise NotImplementedError()
 
-    def _set_edge_tokens(self, edge, hg, parse):
+    def _set_edge_tokens(self, edge: Hyperedge, hg, parse: dict) -> None:
+        """Set token attributes on edge. Override in subclasses."""
         raise NotImplementedError()
 
-    def _poss2text(self, edge, parse):
+    def _poss2text(self, edge: Hyperedge, parse: dict) -> str:
+        """Convert possessive edge to text. Override in subclasses."""
         raise NotImplementedError()
 
-    def _resolve_corefs(self, parse_results):
+    def _resolve_corefs(self, parse_results: dict[str, Any]) -> None:
+        """Resolve coreferences in parse results. Override in subclasses."""
         # do nothing if not implemented in derived classes
         for parse in parse_results['parses']:
             parse['resolved_corefs'] = parse['main_edge']

@@ -1,12 +1,20 @@
+from typing import Optional, Tuple
+
 import graphbrain.constants as const
+from graphbrain.hyperedge import Hyperedge
 
 
-def lemma(hg, atom, same_if_none=False):
-    """Returns the lemma of the given atom if it exists, None otherwise.
+def lemma(hg, atom: Hyperedge, same_if_none: bool = False) -> Optional[Hyperedge]:
+    """Return the lemma of the given atom if it exists.
 
-    Keyword argument:
-    same_if_none -- if False, returns None when lemma does not exist. If True,
-    returns atom items when lemma does not exist. (default: False)
+    Args:
+        hg: Hypergraph containing lemma edges.
+        atom: Atom to find lemma for.
+        same_if_none: If True, returns atom when lemma not found.
+                     If False, returns None when lemma not found.
+
+    Returns:
+        Lemma atom, the original atom (if same_if_none), or None.
     """
     if atom.atom:
         satom = atom.simplify()
@@ -19,23 +27,25 @@ def lemma(hg, atom, same_if_none=False):
     return None
 
 
-def deep_lemma(hg, edge, same_if_none=False):
-    """Returns the lemma of an atomic edge, or the lemma of the first atom
-    found by recursively descending the hyperedge, always choosing the
-    subedge immediatly after the connector.
+def deep_lemma(hg, edge: Hyperedge, same_if_none: bool = False) -> Optional[Hyperedge]:
+    """Return lemma by recursively descending the edge.
 
-    This is useful, for example, to find the lemma of the central verb
-    in a non-atomic predicate edge. For example:
+    Finds the lemma of an atomic edge, or the lemma of the first atom
+    found by recursively descending, always choosing the subedge
+    immediately after the connector.
 
-    (not/A (is/A going/P))
+    Useful for finding the lemma of the central verb in a non-atomic
+    predicate edge. For example:
 
-    could return
+    (not/A (is/A going/P)) -> go/P
 
-    go/P
+    Args:
+        hg: Hypergraph containing lemma edges.
+        edge: Edge to find lemma for.
+        same_if_none: If True, returns atom when lemma not found.
 
-    Keyword argument:
-    same_if_none -- if False, returns None when lemma does not exist. If True,
-    returns atom items when lemma does not exist. (default: False)
+    Returns:
+        Lemma atom, the original atom (if same_if_none), or None.
     """
     if edge.atom:
         return lemma(hg, edge, same_if_none)
@@ -43,13 +53,21 @@ def deep_lemma(hg, edge, same_if_none=False):
         return deep_lemma(hg, edge[1])
 
 
-def lemma_degrees(hg, edge):
-    """Finds all the atoms that share the same given lemma
-    and computes the sum of both their degrees and deep degrees.
-    These two sums are returned.
+def lemma_degrees(hg, edge: Hyperedge) -> Tuple[int, int]:
+    """Compute degree sum for all atoms sharing the same lemma.
 
-    If the parameter edge is non-atomic, this function simply returns
-    the degree and deep degree of that edge.
+    Finds all atoms that share the same given lemma and computes
+    the sum of both their degrees and deep degrees.
+
+    If the edge is non-atomic, simply returns the degree and
+    deep degree of that edge.
+
+    Args:
+        hg: Hypergraph to query.
+        edge: Edge to compute degrees for.
+
+    Returns:
+        Tuple of (degree_sum, deep_degree_sum).
     """
     if edge.atom:
         roots = {edge.root()}
