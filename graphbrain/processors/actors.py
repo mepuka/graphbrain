@@ -116,7 +116,10 @@ class Actors(Processor):
                     subject = strip_concept(subjects[0])
                     if subject and has_proper_concept(subject):
                         pred = edge[0]
-                        dlemma = deep_lemma(self.hg, pred, same_if_none=True).root()
+                        lemma_edge = deep_lemma(self.hg, pred, same_if_none=True)
+                        if lemma_edge is None:
+                            return
+                        dlemma = lemma_edge.root()
                         if dlemma in self.action_predicates:
                             try:
                                 actor = main_coref(self.hg, subject)

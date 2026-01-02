@@ -329,9 +329,10 @@ class StructuredClaims(Processor):
             ct = edge.connector_type()
             if ct[0] == 'P':
                 pred = edge[0]
-                pred_lemma = deep_lemma(
-                    self.hg, pred, same_if_none=True
-                ).root()
+                lemma_edge = deep_lemma(self.hg, pred, same_if_none=True)
+                if lemma_edge is None:
+                    return
+                pred_lemma = lemma_edge.root()
 
                 if (len(edge) > 2 and pred_lemma in self.claim_predicates):
                     subjects = edge.edges_with_argrole('s')

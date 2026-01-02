@@ -144,11 +144,10 @@ class Claims(Processor):
             ct = edge.connector_type()
             if ct[0] == 'P':
                 pred = edge[0]
-                if (len(edge) > 2 and
-                        deep_lemma(
-                            self.hg,
-                            pred,
-                            same_if_none=True).root() in self.claim_predicates):
+                lemma_edge = deep_lemma(self.hg, pred, same_if_none=True)
+                if lemma_edge is None:
+                    return
+                if len(edge) > 2 and lemma_edge.root() in self.claim_predicates:
                     subjects = edge.edges_with_argrole('s')
                     claims = edge.edges_with_argrole('r')
                     if len(subjects) == 1 and len(claims) >= 1:

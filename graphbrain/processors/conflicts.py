@@ -34,11 +34,10 @@ class Conflicts(Processor):
             ct = edge.connector_type()
             if ct[0] == 'P':
                 pred = edge[0]
-                if (len(edge) > 2 and
-                        deep_lemma(
-                            self.hg,
-                            pred,
-                            same_if_none=True).root() in CONFLICT_PRED_LEMMAS):
+                lemma_edge = deep_lemma(self.hg, pred, same_if_none=True)
+                if lemma_edge is None:
+                    return
+                if len(edge) > 2 and lemma_edge.root() in CONFLICT_PRED_LEMMAS:
                     subjects = edge.edges_with_argrole('s')
                     objects = edge.edges_with_argrole('o')
                     if len(subjects) == 1 and len(objects) == 1:

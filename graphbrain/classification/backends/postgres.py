@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS semantic_classes (
 
 CREATE INDEX IF NOT EXISTS idx_sc_name ON semantic_classes (name);
 CREATE INDEX IF NOT EXISTS idx_sc_domain ON semantic_classes (domain);
+CREATE INDEX IF NOT EXISTS idx_sc_domain_name ON semantic_classes (domain, name);
 
 -- Predicate banks with full-text search
 CREATE TABLE IF NOT EXISTS predicate_banks (
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS predicate_banks (
 
 CREATE INDEX IF NOT EXISTS idx_pb_class ON predicate_banks (class_id);
 CREATE INDEX IF NOT EXISTS idx_pb_lemma ON predicate_banks (lemma);
+CREATE INDEX IF NOT EXISTS idx_pb_class_freq ON predicate_banks (class_id, is_seed DESC, frequency DESC);
 
 -- Pattern definitions
 CREATE TABLE IF NOT EXISTS class_patterns (
@@ -98,6 +100,7 @@ CREATE TABLE IF NOT EXISTS edge_classifications (
 CREATE INDEX IF NOT EXISTS idx_ec_edge ON edge_classifications (edge_key);
 CREATE INDEX IF NOT EXISTS idx_ec_class ON edge_classifications (class_id);
 CREATE INDEX IF NOT EXISTS idx_ec_confidence ON edge_classifications (confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_ec_class_confidence ON edge_classifications (class_id, confidence DESC);
 
 -- Classification feedback for active learning
 CREATE TABLE IF NOT EXISTS classification_feedback (
@@ -113,20 +116,15 @@ CREATE TABLE IF NOT EXISTS classification_feedback (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cf_status ON classification_feedback (status);
+CREATE INDEX IF NOT EXISTS idx_cf_status_created ON classification_feedback (status, created_at);
 """
 
 # Template for adding embedding columns - dimensions filled in at runtime
 _ADD_EMBEDDING_COLUMNS_TEMPLATE = """
-DO $$
-BEGIN
-    -- Add embedding column to semantic_classes
-    ALTER TABLE semantic_classes ADD COLUMN IF NOT EXISTS embedding vector({dimensions});
-    -- Add embedding column to predicate_banks
-    ALTER TABLE predicate_banks ADD COLUMN IF NOT EXISTS embedding vector({dimensions});
-EXCEPTION
-    WHEN OTHERS THEN
-        RAISE NOTICE 'Could not add embedding columns (pgvector may not be available)';
-END $$;
+-- Add embedding column to semantic_classes
+ALTER TABLE semantic_classes ADD COLUMN IF NOT EXISTS embedding vector({dimensions});
+-- Add embedding column to predicate_banks
+ALTER TABLE predicate_banks ADD COLUMN IF NOT EXISTS embedding vector({dimensions});
 """
 
 
@@ -269,19 +267,24 @@ class PostgresBackend(ClassificationBackend):
         with self._conn.cursor() as cur:
             cur.execute(_CREATE_CLASSIFICATION_SCHEMA)
 
-            # Check pgvector version for index type selection
+            # Check pgvector version - it's required for PostgreSQL backend
             self._pgvector_version = _get_pgvector_version(self._conn)
+            if self._pgvector_version is None:
+                raise RuntimeError(
+                    "pgvector extension is required for PostgreSQL backend. "
+                    "Install with: CREATE EXTENSION vector; "
+                    "See https://github.com/pgvector/pgvector for installation instructions."
+                )
 
             # Determine index type (fall back to ivfflat if HNSW not supported)
             index_type = self.embedding_config.index_type
-            if index_type == "hnsw" and self._pgvector_version:
+            if index_type == "hnsw" and self._pgvector_version < (0, 5, 0):
                 # HNSW requires pgvector >= 0.5.0
-                if self._pgvector_version < (0, 5, 0):
-                    logger.warning(
-                        f"pgvector {'.'.join(map(str, self._pgvector_version))} "
-                        "doesn't support HNSW; falling back to IVFFlat"
-                    )
-                    index_type = "ivfflat"
+                logger.warning(
+                    f"pgvector {'.'.join(map(str, self._pgvector_version))} "
+                    "doesn't support HNSW; falling back to IVFFlat"
+                )
+                index_type = "ivfflat"
 
             # Add embedding columns
             add_columns_sql = _ADD_EMBEDDING_COLUMNS_TEMPLATE.format(
@@ -306,7 +309,7 @@ class PostgresBackend(ClassificationBackend):
 
         logger.debug(
             f"Classification schema initialized (pgvector: "
-            f"{'.'.join(map(str, self._pgvector_version)) if self._pgvector_version else 'not available'}, "
+            f"{'.'.join(map(str, self._pgvector_version))}, "
             f"index: {index_type})"
         )
 

@@ -50,7 +50,7 @@ def deep_lemma(hg, edge: Hyperedge, same_if_none: bool = False) -> Optional[Hype
     if edge.atom:
         return lemma(hg, edge, same_if_none)
     else:
-        return deep_lemma(hg, edge[1])
+        return deep_lemma(hg, edge[1], same_if_none)
 
 
 def lemma_degrees(hg, edge: Hyperedge) -> Tuple[int, int]:

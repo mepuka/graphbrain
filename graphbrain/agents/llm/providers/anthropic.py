@@ -80,8 +80,9 @@ class AnthropicProvider(LLMProvider):
             logger.info("Using Claude Agent SDK for structured outputs")
         else:
             self._use_agent_sdk = False
-            self._client = anthropic.Anthropic(api_key=api_key)
-            logger.info("Using direct Anthropic API")
+            # Use AsyncAnthropic for async compatibility
+            self._client = anthropic.AsyncAnthropic(api_key=api_key)
+            logger.info("Using direct Anthropic API (async)")
 
     @property
     def name(self) -> str:
@@ -177,7 +178,7 @@ class AnthropicProvider(LLMProvider):
 
         for attempt in range(self._max_retries):
             try:
-                response = self._client.messages.create(
+                response = await self._client.messages.create(
                     model=self._model,
                     max_tokens=4096,
                     system=system_prompt or "",
