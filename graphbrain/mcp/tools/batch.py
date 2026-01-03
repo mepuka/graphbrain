@@ -57,40 +57,61 @@ Returns:
         updated = 0
         failed = []
 
-        for i, edge_spec in enumerate(edges):
-            edge_str = edge_spec.get("edge")
-            if not edge_str:
-                failed.append({"index": i, "error": "Missing 'edge' field"})
-                continue
+        # Wrap entire batch in a transaction for atomicity and performance
+        try:
+            hg.begin_transaction()
+        except (AttributeError, NotImplementedError):
+            pass  # Backend doesn't support transactions (unlikely)
 
-            text = edge_spec.get("text")
-            primary = edge_spec.get("primary", True)
+        try:
+            for i, edge_spec in enumerate(edges):
+                edge_str = edge_spec.get("edge")
+                if not edge_str:
+                    failed.append({"index": i, "error": "Missing 'edge' field"})
+                    continue
 
+                text = edge_spec.get("text")
+                primary = edge_spec.get("primary", True)
+
+                try:
+                    parsed_edge = he.hedge(edge_str)
+                    existed = hg.exists(parsed_edge)
+
+                    if primary:
+                        hg.add(parsed_edge, primary=True)
+                    else:
+                        hg.add(parsed_edge)
+
+                    if existed:
+                        updated += 1
+                    else:
+                        added += 1
+
+                    # Index text if provided
+                    if text:
+                        hg.set_attribute(parsed_edge, "text", text)
+                        if searcher:
+                            try:
+                                searcher.add_text(parsed_edge.to_str(), text)
+                            except Exception:
+                                pass  # Non-critical
+
+                except Exception as e:
+                    failed.append({"index": i, "edge": edge_str, "error": str(e)})
+
+            # Commit the transaction
             try:
-                parsed_edge = he.hedge(edge_str)
-                existed = hg.exists(parsed_edge)
-
-                if primary:
-                    hg.add(parsed_edge, primary=True)
-                else:
-                    hg.add(parsed_edge)
-
-                if existed:
-                    updated += 1
-                else:
-                    added += 1
-
-                # Index text if provided
-                if text:
-                    hg.set_attribute(parsed_edge, "text", text)
-                    if searcher:
-                        try:
-                            searcher.add_text(parsed_edge.to_str(), text)
-                        except Exception:
-                            pass  # Non-critical
-
-            except Exception as e:
-                failed.append({"index": i, "edge": edge_str, "error": str(e)})
+                hg.end_transaction()
+            except (AttributeError, NotImplementedError):
+                pass
+        except Exception as e:
+            # Rollback on error
+            try:
+                hg.rollback()
+            except (AttributeError, NotImplementedError):
+                pass
+            logger.error(f"batch_add_edges: transaction failed - {e}")
+            raise
 
         logger.info(f"batch_add_edges: added={added}, updated={updated}, failed={len(failed)}")
         return {

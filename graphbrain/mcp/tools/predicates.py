@@ -19,6 +19,36 @@ from graphbrain.classification.models import PredicateBankEntry
 logger = logging.getLogger(__name__)
 
 
+def _get_predicate_counts(lifespan_data: dict) -> dict:
+    """Get or compute cached predicate counts from the hypergraph.
+
+    This function caches the result in lifespan_data to avoid
+    repeated full-graph scans during a session.
+    """
+    # Check cache first
+    if "predicate_counts_cache" in lifespan_data:
+        return lifespan_data["predicate_counts_cache"]
+
+    # Compute predicate counts
+    hg = lifespan_data["hg"]
+    predicate_counts = {}
+
+    for edge in hg.all():
+        if not edge.atom and len(edge) > 0:
+            connector = edge[0]
+            if connector.atom:
+                atom_type = connector.type()
+                if atom_type and atom_type.startswith('P'):  # Pd, Pm, etc.
+                    lemma = connector.root()
+                    predicate_counts[lemma] = predicate_counts.get(lemma, 0) + 1
+
+    # Cache the result
+    lifespan_data["predicate_counts_cache"] = predicate_counts
+    logger.info(f"_get_predicate_counts: cached {len(predicate_counts)} predicates")
+
+    return predicate_counts
+
+
 def register_predicate_tools(server: FastMCP):
     """Register predicate tools with the MCP server."""
 
@@ -48,25 +78,12 @@ Returns:
         """Discover unclassified predicates."""
         logger.debug(f"discover_predicates: min_frequency={min_frequency}, limit={limit}")
 
-        import graphbrain.hyperedge as he
-
         ctx = server.get_context()
         lifespan_data = ctx.request_context.lifespan_context
-        hg = lifespan_data["hg"]
         repo = lifespan_data["repo"]
 
-        # Count predicate occurrences
-        predicate_counts = {}
-
-        for edge in hg.all():
-            if not edge.atom and len(edge) > 0:
-                connector = edge[0]
-                if connector.atom:
-                    # Check if it's a predicate type
-                    atom_type = connector.type()
-                    if atom_type and atom_type.startswith('P'):  # Pd, Pm, etc.
-                        lemma = connector.root()
-                        predicate_counts[lemma] = predicate_counts.get(lemma, 0) + 1
+        # Get cached predicate counts (computed once per session)
+        predicate_counts = _get_predicate_counts(lifespan_data)
 
         # Filter by frequency and check if already classified
         discovered = []
@@ -323,7 +340,6 @@ Returns:
         ctx = server.get_context()
         lifespan_data = ctx.request_context.lifespan_context
         repo = lifespan_data["repo"]
-        hg = lifespan_data["hg"]
 
         # Get the class
         if class_id:
@@ -366,16 +382,8 @@ Returns:
 
         # Get candidates - either provided or discover from graph
         if candidates is None:
-            # Discover predicates from the graph
-            predicate_counts = {}
-            for edge in hg.all():
-                if not edge.atom and len(edge) > 0:
-                    connector = edge[0]
-                    if connector.atom:
-                        atom_type = connector.type()
-                        if atom_type and atom_type.startswith('P'):
-                            lemma = connector.root()
-                            predicate_counts[lemma] = predicate_counts.get(lemma, 0) + 1
+            # Get cached predicate counts (computed once per session)
+            predicate_counts = _get_predicate_counts(lifespan_data)
 
             # Filter to frequent predicates not already in class
             existing = {e.lemma for e in repo.get_predicates_by_class(sem_class.id)}

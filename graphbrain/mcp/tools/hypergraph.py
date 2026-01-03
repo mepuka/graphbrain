@@ -112,6 +112,11 @@ Variable capture (use UPPERCASE names with type):
 - MESSAGE/* : Capture anything to MESSAGE
 - PRED/Pd : Capture a declarative predicate to PRED
 
+Args:
+    pattern: Pattern in SH notation
+    strict: If True, atoms are matched exactly (faster). If False, subtypes/roles match flexibly.
+    limit: Maximum results (default 100)
+
 Returns:
   - edges: list of {edge, bindings} where bindings maps VAR names to matched values
   - pattern: the pattern used
@@ -120,6 +125,7 @@ Returns:
     )
     async def pattern_match(
         pattern: str,
+        strict: bool = False,
         limit: int = 100,
     ) -> dict:
         """Match edges against a structural pattern."""
@@ -127,9 +133,7 @@ Returns:
         if error := validate_limit(limit, max_limit=10000):
             return error
 
-        logger.debug(f"pattern_match: pattern='{pattern}', limit={limit}")
-
-        from graphbrain.patterns import match_pattern
+        logger.debug(f"pattern_match: pattern='{pattern}', strict={strict}, limit={limit}")
 
         ctx = server.get_context()
         lifespan_data = ctx.request_context.lifespan_context
@@ -144,22 +148,20 @@ Returns:
         results = []
         count = 0
 
-        for edge in hg.all():
+        # Use hg.match() which leverages indexing when strict=True
+        for edge, bindings_list in hg.match(pattern_edge, strict=strict):
             if count >= limit:
                 break
 
-            # match_pattern returns List[Dict] of bindings, or empty list if no match
-            bindings_list = match_pattern(edge, pattern_edge)
-            if bindings_list:
-                # Take first binding set (there may be multiple valid bindings)
-                bindings = bindings_list[0]
-                results.append({
-                    "edge": edge.to_str(),
-                    "bindings": {k: v.to_str() for k, v in bindings.items()},
-                })
-                count += 1
+            # Take first binding set (there may be multiple valid bindings)
+            bindings = bindings_list[0] if bindings_list else {}
+            results.append({
+                "edge": edge.to_str(),
+                "bindings": {k: v.to_str() for k, v in bindings.items()},
+            })
+            count += 1
 
-        logger.info(f"pattern_match: found {count} matches for pattern")
+        logger.info(f"pattern_match: found {count} matches for pattern (strict={strict})")
         return {
             "status": "success",
             "edges": results,
@@ -353,6 +355,12 @@ Returns:
         lifespan_data = ctx.request_context.lifespan_context
         hg = lifespan_data["hg"]
 
+        # Check cache first (stats don't change frequently in a session)
+        if "hypergraph_stats_cache" in lifespan_data:
+            cached = lifespan_data["hypergraph_stats_cache"]
+            logger.debug("hypergraph_stats: returning cached stats")
+            return cached
+
         total = 0
         atoms = 0
         edges_count = 0
@@ -367,11 +375,15 @@ Returns:
             if hg.is_primary(edge):
                 primary += 1
 
-        logger.info(f"hypergraph_stats: {total} entries ({atoms} atoms, {edges_count} edges, {primary} primary)")
-        return {
+        result = {
             "status": "success",
             "total_entries": total,
             "atoms": atoms,
             "edges": edges_count,
             "primary_edges": primary,
         }
+
+        # Cache the result
+        lifespan_data["hypergraph_stats_cache"] = result
+        logger.info(f"hypergraph_stats: {total} entries ({atoms} atoms, {edges_count} edges, {primary} primary)")
+        return result
