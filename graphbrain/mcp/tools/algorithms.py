@@ -221,9 +221,9 @@ Returns:
         if error := validate_positive_int(max_depth, "max_depth"):
             return error
 
-        logger.debug(f"find_path: source='{source}', target='{target}'")
+        logger.debug(f"find_path: source='{source}', target='{target}', max_depth={max_depth}")
 
-        from graphbrain.algorithms import shortest_path, has_path
+        from graphbrain.algorithms import shortest_path
 
         ctx = server.get_context()
         lifespan_data = ctx.request_context.lifespan_context
@@ -236,8 +236,10 @@ Returns:
             return invalid_edge_error(f"{source} or {target}", e)
 
         try:
-            # Check if path exists first
-            if not has_path(hg, source_atom, target_atom):
+            # Find shortest path (returns None if no path exists)
+            path = shortest_path(hg, source_atom, target_atom)
+
+            if path is None:
                 return {
                     "status": "success",
                     "path": None,
@@ -245,23 +247,27 @@ Returns:
                     "exists": False,
                 }
 
-            path = shortest_path(hg, source_atom, target_atom)
-            if path:
-                path_strs = [str(atom) for atom in path]
-                logger.info(f"find_path: found path of length {len(path) - 1}")
-                return {
-                    "status": "success",
-                    "path": path_strs,
-                    "length": len(path) - 1,
-                    "exists": True,
-                }
-            else:
+            path_length = len(path) - 1
+
+            # Check if path exceeds max_depth
+            if path_length > max_depth:
+                logger.info(f"find_path: path exists but length {path_length} exceeds max_depth {max_depth}")
                 return {
                     "status": "success",
                     "path": None,
                     "length": None,
                     "exists": False,
+                    "note": f"Path exists but length ({path_length}) exceeds max_depth ({max_depth})",
                 }
+
+            path_strs = [str(atom) for atom in path]
+            logger.info(f"find_path: found path of length {path_length}")
+            return {
+                "status": "success",
+                "path": path_strs,
+                "length": path_length,
+                "exists": True,
+            }
         except Exception as e:
             logger.error(f"find_path: error - {e}")
             return service_unavailable_error("path_algorithm", str(e))
@@ -291,6 +297,7 @@ Returns:
         from graphbrain.algorithms import (
             summary,
             connected_components,
+            transitivity,
         )
 
         ctx = server.get_context()
@@ -300,16 +307,17 @@ Returns:
         try:
             stats = summary(hg)
             components = connected_components(hg)
+            trans = transitivity(hg)
 
             result = {
                 "status": "success",
-                "nodes": stats.get("nodes", 0),
-                "edges": stats.get("edges", 0),
+                "nodes": stats.get("node_count", 0),
+                "edges": stats.get("edge_count", 0),
                 "components": len(components),
                 "density": stats.get("density", 0.0),
-                "clustering": stats.get("average_clustering", 0.0),
-                "transitivity": stats.get("transitivity", 0.0),
-                "diameter": stats.get("diameter"),
+                "clustering": stats.get("avg_clustering", 0.0),
+                "transitivity": trans,
+                "diameter": None,  # Not computed - too expensive for large graphs
             }
 
             logger.info(f"get_graph_stats: {result['nodes']} nodes, {result['edges']} edges, {result['components']} components")
@@ -360,7 +368,7 @@ Returns:
             return invalid_edge_error(center, e)
 
         try:
-            atoms = ego_atoms(hg, center_atom, depth=radius)
+            atoms = ego_atoms(hg, center_atom, radius=radius)
             atom_strs = [str(atom) for atom in atoms]
 
             result = {
@@ -370,7 +378,7 @@ Returns:
             }
 
             if include_edges:
-                edges = list(ego_graph(hg, center_atom, depth=radius))
+                edges = list(ego_graph(hg, center_atom, radius=radius))
                 result["edges"] = [e.to_str() for e in edges[:500]]  # Limit to 500
                 result["edge_count"] = len(edges)
 
@@ -407,8 +415,6 @@ Returns:
 
         logger.debug(f"find_neighbors: atom='{atom}', limit={limit}")
 
-        from graphbrain.algorithms import neighbors
-
         ctx = server.get_context()
         lifespan_data = ctx.request_context.lifespan_context
         hg = lifespan_data["hg"]
@@ -419,7 +425,14 @@ Returns:
             return invalid_edge_error(atom, e)
 
         try:
-            neighbor_set = neighbors(hg, atom_edge)
+            # Use efficient hg.star() pattern instead of building full projection
+            # This only iterates edges containing this atom, not all 600K+ edges
+            neighbor_set = set()
+            for edge in hg.star(atom_edge):
+                for contained_atom in edge.atoms():
+                    if contained_atom != atom_edge:
+                        neighbor_set.add(contained_atom)
+
             neighbor_list = [str(n) for n in list(neighbor_set)[:limit]]
 
             logger.info(f"find_neighbors: found {len(neighbor_set)} neighbors")
